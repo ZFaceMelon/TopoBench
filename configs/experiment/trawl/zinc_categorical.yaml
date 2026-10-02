@@ -1,0 +1,29 @@
+# @package _global_
+# Historical-style categorical regression; full score parity is unverified.
+defaults:
+  - /experiment/trawl/categorical
+  - override /dataset: graph/ZINC
+  - override /optimizer: trawl_cosine
+dataset:
+  parameters:
+    loss_type: mae
+  dataloader_params:
+    batch_size: 32
+model:
+  backbone:
+    checkpoint_layers: true
+    # trawl_zinc.py: K_WALKS = 8.
+    walks:
+      k: 8
+trainer:
+  max_epochs: 300
+  check_val_every_n_epoch: 1
+  gradient_clip_val: 1.0
+callbacks:
+  early_stopping:
+    # trawl_zinc.py default PATIENCE = 40.
+    patience: 40
+evaluation:
+  # trawl_zinc.py: TTA_SETS = 3 for the final test only.
+  walk_views: 3
+tags: [trawl, historical-profile, parity-unverified]

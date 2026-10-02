@@ -1,0 +1,23 @@
+defaults:
+  - /model/general/trawl@_here_
+  - _self_
+
+backbone:
+  loss: null
+  _target_: topobench.nn.backbones.general.trawl_continuous.ContinuousTRAWL
+  _recursive_: false
+  max_rank: 1
+  num_neighborhoods: 1
+  hidden_dim: 224
+  pe_dim: 32
+  signal_dim: 4
+  embed_dim: 64
+  dropout: 0.5
+  sampling_protocol: historical
+  walks:
+    guidance: null
+readout:
+  input_dropout: 0.0
+  aggregation: walk_logits
+  out_channels: 1
+  dropout: 0.5

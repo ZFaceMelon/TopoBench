@@ -1,0 +1,22 @@
+defaults:
+  - /model/general/trawl_continuous@_here_
+  - _self_
+backbone:
+  _target_: topobench.nn.backbones.general.trawl_categorical.CategoricalTRAWL
+  architecture: mamba
+  hidden_dim: 128
+  depth: 4
+  pooling: mean
+  pe_dim: 16
+  dropout: 0.2
+  layer_dropout: 0.2
+  sampling_protocol: stable
+  walk_refresh: fixed
+  vocab_size: 6
+  num_atom_types: 64
+readout:
+  aggregation: deepset
+  head_hidden: null
+  input_dropout: 0.2
+  dropout: 0.2
+  out_channels: ${dataset.parameters.num_classes}
