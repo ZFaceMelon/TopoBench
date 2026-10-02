@@ -1,0 +1,51 @@
+# @package _global_
+# Shared historical-style settings; see docs/trawl.md for parity status.
+defaults:
+  - override /model: general/trawl_continuous
+  - override /transforms: trawl_historical
+  - override /optimizer: trawl
+
+dataset:
+  parameters:
+    loss_type: BCE
+  split_params:
+    split_type: stratified
+    data_seed: ${seed}
+    train_prop: 0.5
+  dataloader_params:
+    batch_size: 2
+    order_seed: ${seed}
+    # Pinned batches transfer asynchronously; results are unchanged.
+    pin_memory: true
+trainer:
+  accumulate_grad_batches: 4
+  max_epochs: 300
+  check_val_every_n_epoch: 1
+  gradient_clip_val: 1.0
+callbacks:
+  early_stopping:
+    patience: 50
+model:
+  # Historical runs trained under AMP but evaluated in full precision.
+  evaluation_autocast: false
+  backbone:
+    # Historical fine-tuning validated every epoch with three walk views.
+    eval_views: 3
+    checkpoint_layers: true
+    layer_options:
+      mamba:
+        scan: sequential
+pretraining:
+  enabled: true
+  reset_head: true
+  # Historical SSL counted improvements larger than 1e-5 only.
+  min_delta: 1.0e-5
+  weight_decay: ${optimizer.parameters.weight_decay}
+# Repeatable runs: seeded sampling plus deterministic CUDA kernels.
+deterministic: strict
+evaluator:
+  # Input checks synchronize the device on every metric update.
+  validate_args: false
+tags: [trawl, historical-profile, parity-unverified]
+evaluation:
+  walk_views: 3

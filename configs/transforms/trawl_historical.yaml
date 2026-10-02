@@ -1,0 +1,17 @@
+historical:
+  transform_name: HistoricalCellTransform
+  schema_version: 1
+  lift: true
+  seed: ${seed}
+  rwse_samples: 8
+  rw_steps: 8
+  split_seeds: true
+  rich_features: false
+  attr_dim: 0
+  guidance:
+    gamma: 0.2
+    diffusion_t: 0.1
+  spectral:
+    heat_times: [0.05, 0.1, 0.2, 0.5, 1.0]
+    electrostatic_betas: [0.1, 0.5, 1.0]
+    laplacian_dim: 8

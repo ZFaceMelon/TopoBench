@@ -1,0 +1,13 @@
+{
+  "sources": {
+    "snapshots/proteins_peak224_l5_mean_7470_5seed/mutag_edvw_ccmamba.py": "1df42cc2ad3c78575fadcfc821020ab0ce5ef0b0f78346d8d061baea612908f0",
+    "snapshots/proteins_peak224_l5_mean_7470_5seed/trawl_proteins.py": "3a8ab77c91cb141e95283f28ca8615f4a53c73408fe439434aaf98c702433a11",
+    "snapshots/proteins_peak224_richfeat_hybrid_learnable_gate/trawl_proteins.py": "63e171a1d3794f1ea236209d1837a79872381f98981fc984c3b554134f1108e2"
+  },
+  "torch": "2.5.1+cpu",
+  "seed": [
+    781,
+    782
+  ],
+  "scope": "Layer/continuous-encoder forward, gradient and Adam-step parity; not end-to-end run reproduction."
+}

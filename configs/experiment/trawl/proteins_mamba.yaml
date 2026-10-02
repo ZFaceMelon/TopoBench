@@ -1,0 +1,9 @@
+# @package _global_
+defaults:
+  - /experiment/trawl/continuous
+  - override /dataset: graph/PROTEINS
+
+model:
+  backbone:
+    architecture: mamba
+seed: 40

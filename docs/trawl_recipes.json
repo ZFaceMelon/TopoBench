@@ -1,0 +1,714 @@
+{
+  "schema_version": 1,
+  "score_reproduction_verified": false,
+  "evidence_date": "2026-09-22",
+  "evidence_scope": "Locally preserved original TRAWL experiment records. Metrics below were not produced by this TopoBench integration.",
+  "integration_validation": {
+    "date": "2026-09-29",
+    "cpu_suite": {
+      "passed": 673,
+      "skipped": 29
+    },
+    "tutorials_passed": 8,
+    "linux_gpu_trawl_suite": {
+      "passed": 110,
+      "skipped": 0
+    },
+    "additional_hybrid_single_and_two_gpu_cases_passed": 8,
+    "real_data_update_recipes": [
+      "proteins_mamba",
+      "proteins_hybrid",
+      "nci1_hybrid",
+      "nci1_sisa",
+      "proteins_gated",
+      "zinc_categorical"
+    ],
+    "scope": "Overlapping execution checks and full benchmark reruns. The initial fifteen main seed runs completed but were superseded after a walk-head RNG fix. Final CPU/GPU regression passes; benchmark reruns against benchmark_source_v8 are in progress. Exact historical reproduction is unverified.",
+    "checkpoint_backups": {
+      "completed_runs": 16,
+      "checkpoint_files": 108,
+      "sha256_verified": true,
+      "finite_state_verified": true
+    }
+  },
+  "evidence_artifacts_in_original_trawl_repository": [
+    "results/trawl_experiment_ledger.csv",
+    "results/wandb_trawl_evidence_2026-09-09.json",
+    "docs/TRAWL_TECHNICAL_NOTE.md"
+  ],
+  "recipes": {
+    "proteins_mamba": {
+      "recorded_mean_accuracy_percent": 74.7,
+      "source_snapshot": "snapshots/proteins_peak224_l5_mean_7470_5seed",
+      "status": "Frozen source available; continuous encoder component parity tested; complete training parity unverified"
+    },
+    "proteins_hybrid": {
+      "group": "peak224_hybrid_msmsm_top5_20260824",
+      "run_ids": [
+        "lrtnpo7h",
+        "qkoyxc75",
+        "t7qupsvf",
+        "tqm6amja",
+        "e8drcuzc"
+      ],
+      "seeds": [
+        40,
+        41,
+        42,
+        43,
+        44
+      ],
+      "recorded_mean_accuracy_percent": 75.196,
+      "recorded_population_sd_percent": 1.328,
+      "status": "Runnable reconstruction of known settings; exact source-to-run linkage unresolved"
+    },
+    "nci1_hybrid": {
+      "group": "nci1_peak224_richfeat_20260828",
+      "run_ids": [
+        "3nm31gq8",
+        "ztgjbl85",
+        "ccz2u33e",
+        "rbwpazh9",
+        "b207wsc1"
+      ],
+      "recorded_mean_accuracy_percent": 76.752,
+      "recorded_population_sd_percent": 1.483,
+      "status": "Runnable reconstruction of known settings; exact source-to-run linkage unresolved"
+    },
+    "nci1_mamba": {
+      "status": "Architecture ablation; no score reproduction certified"
+    },
+    "nci1_sisa": {
+      "status": "Architecture ablation; no score reproduction certified"
+    },
+    "proteins_gated": {
+      "source_snapshot": "snapshots/proteins_peak224_richfeat_hybrid_learnable_gate",
+      "status": "Extended vocabulary and complementary lifting profile; no score reproduction certified"
+    },
+    "joint": {
+      "source_reference": "snapshots/proteins_peak224_hybrid_champion_joint/trawl_proteins.py",
+      "status": "Optional decaying smooth-L1 auxiliary objective; not the headline hybrid preset"
+    },
+    "zinc_categorical": {
+      "source_reference": "trawl_zinc.py",
+      "status": "Categorical regression with Adam, MAE and linear-warmup/cosine schedule; full preprocessing, RNG and score parity unverified"
+    }
+  },
+  "source_sha256": {
+    "snapshots/proteins_peak224_l5_mean_7470_5seed/trawl_core.py": "b183671cda320387e19581dbcd9225a23f730e66028e0912a9158ace459e56e9",
+    "snapshots/proteins_peak224_l5_mean_7470_5seed/mutag_edvw_laplacian.py": "06e002ebcbd6d3d5f7bb02060a9d0ae57e7382f619005843e7cb6c85483dfce4",
+    "snapshots/proteins_peak224_l5_mean_7470_5seed/mutag_edvw_ccmamba.py": "1df42cc2ad3c78575fadcfc821020ab0ce5ef0b0f78346d8d061baea612908f0",
+    "snapshots/proteins_peak224_l5_mean_7470_5seed/trawl_proteins.py": "3a8ab77c91cb141e95283f28ca8615f4a53c73408fe439434aaf98c702433a11",
+    "snapshots/proteins_peak224_richfeat_hybrid_learnable_gate/trawl_core.py": "745da4fc417302d52c670601271ff0f29b512a2e9306aec737c87d3fdede3421",
+    "snapshots/proteins_peak224_richfeat_hybrid_learnable_gate/trawl_proteins.py": "63e171a1d3794f1ea236209d1837a79872381f98981fc984c3b554134f1108e2"
+  },
+  "acceptance_before_exact_reproduction_claim": [
+    "Recover the exact hybrid source revisions, launch environments, splits and original checkpoint artifacts.",
+    "Compare preprocessing tensors, ordered neighbors, sampled paths and initial weights with the original run artifacts.",
+    "Match pretraining random draws, optimizer exclusions, batch ordering, precision and distributed launch semantics.",
+    "Compare fixed-state forward/backward updates, checkpoint selection, averaging and final multi-view predictions.",
+    "Run the complete original seed set and publish resolved configuration and runtime manifests."
+  ],
+  "benchmark_reruns": [
+    {
+      "status": "diagnostic_superseded",
+      "source_snapshot": "benchmark_source_v2",
+      "superseded_reason": "An unused graph-head dropout call consumed extra random draws before walk-logit prediction; final source removes it.",
+      "date": "2026-09-29",
+      "seeds": [
+        40,
+        41,
+        42,
+        43,
+        44
+      ],
+      "runtime": {
+        "device": "NVIDIA RTX A4000",
+        "precision": "bf16-mixed",
+        "compile_scope": "layers",
+        "checkpoint_layers": false,
+        "cpu_math_threads": 1
+      },
+      "results": [
+        {
+          "recipe": "proteins_hybrid",
+          "n": 5,
+          "mean": 73.83512496948242,
+          "population_sd": 1.4690960646515245
+        },
+        {
+          "recipe": "nci1_hybrid",
+          "n": 5,
+          "mean": 77.12062239646912,
+          "population_sd": 1.3967179643957752
+        },
+        {
+          "recipe": "proteins_mamba",
+          "n": 5,
+          "mean": 74.336918592453,
+          "population_sd": 2.2164340345382882
+        },
+        {
+          "recipe": "nci1_sisa",
+          "n": 1,
+          "mean": 77.4319052696228,
+          "population_sd": 0.0
+        }
+      ],
+      "per_seed": [
+        {
+          "recipe": "nci1_hybrid",
+          "seed": 40,
+          "accuracy_percent": 76.07004046440125
+        },
+        {
+          "recipe": "proteins_hybrid",
+          "seed": 40,
+          "accuracy_percent": 71.32616639137268
+        },
+        {
+          "recipe": "proteins_mamba",
+          "seed": 40,
+          "accuracy_percent": 70.60931921005249
+        },
+        {
+          "recipe": "proteins_mamba",
+          "seed": 41,
+          "accuracy_percent": 75.26881694793701
+        },
+        {
+          "recipe": "nci1_hybrid",
+          "seed": 41,
+          "accuracy_percent": 76.8482506275177
+        },
+        {
+          "recipe": "nci1_hybrid",
+          "seed": 43,
+          "accuracy_percent": 76.26459002494812
+        },
+        {
+          "recipe": "nci1_sisa",
+          "seed": 40,
+          "accuracy_percent": 77.4319052696228
+        },
+        {
+          "recipe": "proteins_hybrid",
+          "seed": 41,
+          "accuracy_percent": 73.83512258529663
+        },
+        {
+          "recipe": "proteins_hybrid",
+          "seed": 43,
+          "accuracy_percent": 75.62723755836487
+        },
+        {
+          "recipe": "nci1_hybrid",
+          "seed": 42,
+          "accuracy_percent": 76.55642032623291
+        },
+        {
+          "recipe": "nci1_hybrid",
+          "seed": 44,
+          "accuracy_percent": 79.8638105392456
+        },
+        {
+          "recipe": "proteins_hybrid",
+          "seed": 42,
+          "accuracy_percent": 74.91039633750916
+        },
+        {
+          "recipe": "proteins_hybrid",
+          "seed": 44,
+          "accuracy_percent": 73.47670197486877
+        },
+        {
+          "recipe": "proteins_mamba",
+          "seed": 42,
+          "accuracy_percent": 76.70251131057739
+        },
+        {
+          "recipe": "proteins_mamba",
+          "seed": 43,
+          "accuracy_percent": 75.9856641292572
+        },
+        {
+          "recipe": "proteins_mamba",
+          "seed": 44,
+          "accuracy_percent": 73.11828136444092
+        }
+      ],
+      "interpretation": "New-run scores; not original checkpoint reproduction. Standard deviations are population SD in percentage points.",
+      "version": "v2"
+    },
+    {
+      "version": "v8",
+      "status": "diagnostic_superseded",
+      "source_snapshot": "benchmark_source_v8",
+      "date": "2026-09-29",
+      "superseded_reason": "Post-run audit: continuous presets validated with one walk view instead of the historical three (drives scheduler, early stopping and top-K selection); top-K ties, SSL min_delta and full-precision evaluation differed from the historical code; one-logit AUROC was batch-dependent. See docs/trawl.md, 'Audit fixes after the v8 matrix'.",
+      "runtime": {
+        "device": "NVIDIA RTX A4000",
+        "precision": "bf16-mixed (evaluation included)",
+        "compile_scope": "layers",
+        "checkpoint_layers": false,
+        "cpu_math_threads": 1
+      },
+      "incomplete": [
+        "nci1_hybrid seed 44 and nci1_sisa seed 40 were still running at collection",
+        "zinc_categorical seed 40 was stopped at epoch 36 at the user's request"
+      ],
+      "auroc_valid": false,
+      "results": [
+        {
+          "recipe": "nci1_hybrid",
+          "n": 4,
+          "mean": 76.8239289522171,
+          "population_sd": 0.8062067424834359
+        },
+        {
+          "recipe": "proteins_gated",
+          "n": 1,
+          "mean": 75.26881694793701,
+          "population_sd": 0.0
+        },
+        {
+          "recipe": "proteins_hybrid",
+          "n": 5,
+          "mean": 74.69534039497375,
+          "population_sd": 1.294300161397236
+        },
+        {
+          "recipe": "proteins_mamba",
+          "n": 5,
+          "mean": 73.1899642944336,
+          "population_sd": 1.625202287052316
+        }
+      ],
+      "per_seed": [
+        {
+          "recipe": "nci1_hybrid",
+          "seed": 40,
+          "accuracy_percent": 78.11284065246582
+        },
+        {
+          "recipe": "nci1_hybrid",
+          "seed": 41,
+          "accuracy_percent": 76.36186480522156
+        },
+        {
+          "recipe": "nci1_hybrid",
+          "seed": 42,
+          "accuracy_percent": 76.8482506275177
+        },
+        {
+          "recipe": "nci1_hybrid",
+          "seed": 43,
+          "accuracy_percent": 75.97275972366333
+        },
+        {
+          "recipe": "proteins_gated",
+          "seed": 40,
+          "accuracy_percent": 75.26881694793701
+        },
+        {
+          "recipe": "proteins_hybrid",
+          "seed": 40,
+          "accuracy_percent": 72.75985479354858
+        },
+        {
+          "recipe": "proteins_hybrid",
+          "seed": 41,
+          "accuracy_percent": 74.55196976661682
+        },
+        {
+          "recipe": "proteins_hybrid",
+          "seed": 42,
+          "accuracy_percent": 75.26881694793701
+        },
+        {
+          "recipe": "proteins_hybrid",
+          "seed": 43,
+          "accuracy_percent": 76.70251131057739
+        },
+        {
+          "recipe": "proteins_hybrid",
+          "seed": 44,
+          "accuracy_percent": 74.19354915618896
+        },
+        {
+          "recipe": "proteins_mamba",
+          "seed": 40,
+          "accuracy_percent": 71.32616639137268
+        },
+        {
+          "recipe": "proteins_mamba",
+          "seed": 41,
+          "accuracy_percent": 74.91039633750916
+        },
+        {
+          "recipe": "proteins_mamba",
+          "seed": 42,
+          "accuracy_percent": 72.75985479354858
+        },
+        {
+          "recipe": "proteins_mamba",
+          "seed": 43,
+          "accuracy_percent": 75.26881694793701
+        },
+        {
+          "recipe": "proteins_mamba",
+          "seed": 44,
+          "accuracy_percent": 71.68458700180054
+        }
+      ],
+      "interpretation": "Measured reruns, not exact historical reproduction. Accuracy is unaffected by the AUROC defect; checkpoint selection used single-view validation."
+    },
+    {
+      "version": "v9",
+      "status": "superseded_by_v10",
+      "source_snapshot": "benchmark_source_v9",
+      "source_archive_sha256": "8d957029938f732659b042950255ef830386337a571254e0d3a1a50fcdfd4dac",
+      "date": "2026-09-30",
+      "seeds": [
+        40,
+        41,
+        42,
+        43,
+        44
+      ],
+      "runtime": {
+        "device": "NVIDIA RTX A4000",
+        "precision": "bf16-mixed training, full-precision evaluation (model.evaluation_autocast=false)",
+        "compile_scope": "layers",
+        "checkpoint_layers": false,
+        "cpu_math_threads": 1,
+        "validation_walk_views": 3,
+        "test_walk_views": 3
+      },
+      "results": [
+        {
+          "recipe": "nci1_hybrid",
+          "n": 5,
+          "mean": 77.60700345039368,
+          "population_sd": 1.7197816159517962,
+          "mean_auroc": 0.8429736018180847
+        },
+        {
+          "recipe": "nci1_sisa",
+          "n": 1,
+          "mean": 76.45914554595947,
+          "population_sd": 0.0,
+          "mean_auroc": 0.8338960409164429
+        },
+        {
+          "recipe": "proteins_gated",
+          "n": 1,
+          "mean": 73.47670197486877,
+          "population_sd": 0.0,
+          "mean_auroc": 0.7703913450241089
+        },
+        {
+          "recipe": "proteins_hybrid",
+          "n": 5,
+          "mean": 74.48028683662415,
+          "population_sd": 1.5932686777126184,
+          "mean_auroc": 0.7961615920066833
+        },
+        {
+          "recipe": "proteins_mamba",
+          "n": 5,
+          "mean": 74.26523327827454,
+          "population_sd": 1.3295513990816663,
+          "mean_auroc": 0.7919288039207458
+        }
+      ],
+      "per_seed": [
+        {
+          "recipe": "nci1_hybrid",
+          "seed": 40,
+          "accuracy_percent": 77.23735570907593,
+          "auroc": 0.8443012237548828
+        },
+        {
+          "recipe": "nci1_hybrid",
+          "seed": 41,
+          "accuracy_percent": 77.62646079063416,
+          "auroc": 0.8392623662948608
+        },
+        {
+          "recipe": "nci1_hybrid",
+          "seed": 42,
+          "accuracy_percent": 79.47470545768738,
+          "auroc": 0.8504860401153564
+        },
+        {
+          "recipe": "nci1_hybrid",
+          "seed": 43,
+          "accuracy_percent": 74.61089491844177,
+          "auroc": 0.8297513723373413
+        },
+        {
+          "recipe": "nci1_hybrid",
+          "seed": 44,
+          "accuracy_percent": 79.08560037612915,
+          "auroc": 0.8510670065879822
+        },
+        {
+          "recipe": "nci1_sisa",
+          "seed": 40,
+          "accuracy_percent": 76.45914554595947,
+          "auroc": 0.8338960409164429
+        },
+        {
+          "recipe": "proteins_gated",
+          "seed": 40,
+          "accuracy_percent": 73.47670197486877,
+          "auroc": 0.7703913450241089
+        },
+        {
+          "recipe": "proteins_hybrid",
+          "seed": 40,
+          "accuracy_percent": 73.11828136444092,
+          "auroc": 0.7848917245864868
+        },
+        {
+          "recipe": "proteins_hybrid",
+          "seed": 41,
+          "accuracy_percent": 73.11828136444092,
+          "auroc": 0.7877172231674194
+        },
+        {
+          "recipe": "proteins_hybrid",
+          "seed": 42,
+          "accuracy_percent": 77.06093192100525,
+          "auroc": 0.8134662508964539
+        },
+        {
+          "recipe": "proteins_hybrid",
+          "seed": 43,
+          "accuracy_percent": 75.62723755836487,
+          "auroc": 0.8105874061584473
+        },
+        {
+          "recipe": "proteins_hybrid",
+          "seed": 44,
+          "accuracy_percent": 73.47670197486877,
+          "auroc": 0.7841453552246094
+        },
+        {
+          "recipe": "proteins_mamba",
+          "seed": 40,
+          "accuracy_percent": 73.11828136444092,
+          "auroc": 0.750773012638092
+        },
+        {
+          "recipe": "proteins_mamba",
+          "seed": 41,
+          "accuracy_percent": 73.83512258529663,
+          "auroc": 0.7761488556861877
+        },
+        {
+          "recipe": "proteins_mamba",
+          "seed": 42,
+          "accuracy_percent": 74.55196976661682,
+          "auroc": 0.8290863037109375
+        },
+        {
+          "recipe": "proteins_mamba",
+          "seed": 43,
+          "accuracy_percent": 76.70251131057739,
+          "auroc": 0.815598726272583
+        },
+        {
+          "recipe": "proteins_mamba",
+          "seed": 44,
+          "accuracy_percent": 73.11828136444092,
+          "auroc": 0.788037121295929
+        }
+      ],
+      "validation": {
+        "cuda_trawl_suite": "133 passed, 0 skipped (mllab08, 2x A4000)",
+        "relocated_checkpoint_replay": "proteins_hybrid s40 (weight_average) and proteins_mamba s40 (best) reproduced recorded val/test accuracy exactly from moved checkpoints",
+        "finite_checks": "all metric histories, model and optimizer tensors finite"
+      },
+      "interpretation": "Measured reruns of the corrected implementation; not certified exact historical reproduction. Differences from recorded historical means are within one population standard deviation.",
+      "superseded_reason": "Valid measured rerun, but not repeatable: unseeded ARPACK starts and nondeterministic CUDA scatter reductions (trainer config disabled deterministic mode)."
+    },
+    {
+      "version": "v10",
+      "status": "accepted_reproducible_rerun",
+      "source_snapshot": "benchmark_source_v10",
+      "source_archive_sha256": "8aeb7725c832f4961339345af11d83d754ea90b6f0cfc0cf118e5e05d1dcda7b",
+      "date": "2026-10-01",
+      "seeds": [
+        40,
+        41,
+        42,
+        43,
+        44
+      ],
+      "runtime": {
+        "device": "NVIDIA RTX A4000",
+        "precision": "bf16-mixed training, full-precision evaluation",
+        "compile_scope": "layers",
+        "deterministic": "strict",
+        "cublas_workspace_config": ":4096:8",
+        "checkpoint_layers": false,
+        "validation_walk_views": 3,
+        "test_walk_views": 3
+      },
+      "results": [
+        {
+          "recipe": "nci1_hybrid",
+          "n": 5,
+          "mean": 77.52918243408203,
+          "population_sd": 0.6539971176445151,
+          "mean_auroc": 0.8460535407066345
+        },
+        {
+          "recipe": "nci1_sisa",
+          "n": 1,
+          "mean": 78.01556587219238,
+          "population_sd": 0.0,
+          "mean_auroc": 0.8419544696807861
+        },
+        {
+          "recipe": "proteins_gated",
+          "n": 1,
+          "mean": 73.47670197486877,
+          "population_sd": 0.0,
+          "mean_auroc": 0.7999253273010254
+        },
+        {
+          "recipe": "proteins_hybrid",
+          "n": 5,
+          "mean": 73.906809091568,
+          "population_sd": 1.7762735064574562,
+          "mean_auroc": 0.7872694373130799
+        },
+        {
+          "recipe": "proteins_mamba",
+          "n": 5,
+          "mean": 74.55197215080261,
+          "population_sd": 2.0776159903691367,
+          "mean_auroc": 0.7918008208274842
+        }
+      ],
+      "per_seed": [
+        {
+          "recipe": "nci1_hybrid",
+          "seed": 40,
+          "accuracy_percent": 78.59922051429749,
+          "auroc": 0.8504746556282043
+        },
+        {
+          "recipe": "nci1_hybrid",
+          "seed": 41,
+          "accuracy_percent": 77.33463048934937,
+          "auroc": 0.8435783386230469
+        },
+        {
+          "recipe": "nci1_hybrid",
+          "seed": 42,
+          "accuracy_percent": 77.62646079063416,
+          "auroc": 0.852306604385376
+        },
+        {
+          "recipe": "nci1_hybrid",
+          "seed": 43,
+          "accuracy_percent": 76.55642032623291,
+          "auroc": 0.8331135511398315
+        },
+        {
+          "recipe": "nci1_hybrid",
+          "seed": 44,
+          "accuracy_percent": 77.52918004989624,
+          "auroc": 0.8507945537567139
+        },
+        {
+          "recipe": "nci1_sisa",
+          "seed": 40,
+          "accuracy_percent": 78.01556587219238,
+          "auroc": 0.8419544696807861
+        },
+        {
+          "recipe": "proteins_gated",
+          "seed": 40,
+          "accuracy_percent": 73.47670197486877,
+          "auroc": 0.7999253273010254
+        },
+        {
+          "recipe": "proteins_hybrid",
+          "seed": 40,
+          "accuracy_percent": 73.11828136444092,
+          "auroc": 0.7712442874908447
+        },
+        {
+          "recipe": "proteins_hybrid",
+          "seed": 41,
+          "accuracy_percent": 71.68458700180054,
+          "auroc": 0.7625012993812561
+        },
+        {
+          "recipe": "proteins_hybrid",
+          "seed": 42,
+          "accuracy_percent": 75.62723755836487,
+          "auroc": 0.8112804889678955
+        },
+        {
+          "recipe": "proteins_hybrid",
+          "seed": 43,
+          "accuracy_percent": 76.34408473968506,
+          "auroc": 0.8230088949203491
+        },
+        {
+          "recipe": "proteins_hybrid",
+          "seed": 44,
+          "accuracy_percent": 72.75985479354858,
+          "auroc": 0.7683122158050537
+        },
+        {
+          "recipe": "proteins_mamba",
+          "seed": 40,
+          "accuracy_percent": 73.11828136444092,
+          "auroc": 0.7754024863243103
+        },
+        {
+          "recipe": "proteins_mamba",
+          "seed": 41,
+          "accuracy_percent": 72.40143418312073,
+          "auroc": 0.7634075880050659
+        },
+        {
+          "recipe": "proteins_mamba",
+          "seed": 42,
+          "accuracy_percent": 76.70251131057739,
+          "auroc": 0.8062160015106201
+        },
+        {
+          "recipe": "proteins_mamba",
+          "seed": 43,
+          "accuracy_percent": 77.4193525314331,
+          "auroc": 0.8176244497299194
+        },
+        {
+          "recipe": "proteins_mamba",
+          "seed": 44,
+          "accuracy_percent": 73.11828136444092,
+          "auroc": 0.7963535785675049
+        }
+      ],
+      "reproducibility": {
+        "cross_host_repeat": "proteins_hybrid seed 40 rerun on a different host (mllab06 vs mllab08): all model, optimizer and scheduler tensors in all 8 checkpoints, metric history and evaluation report bit-identical",
+        "same_host_twin": "two concurrent short runs on separate GPUs bit-identical",
+        "feature_preprocessing": "spectral features independent of build order (seeded ARPACK)",
+        "scope": "Same software stack, GPU model, device count and evaluation batch size"
+      },
+      "validation": {
+        "cpu_suite": "696 passed, 31 hardware skips",
+        "cuda_trawl_suite": "136 passed (mllab08, 2x A4000)"
+      },
+      "interpretation": "Repeatable measured reruns of the corrected implementation; not exact historical reproduction. Each five-seed mean is within one standard deviation of the recorded historical mean."
+    }
+  ]
+}

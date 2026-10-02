@@ -132,19 +132,19 @@ class TestTBEvaluator:
         with pytest.raises(ValueError, match="Invalid task"):
             TBEvaluator(task="wrong_task", num_classes=2, metrics=["accuracy"])
 
-    def test_multilabel_not_implemented(self):
-        """Test that multilabel classification raises NotImplementedError."""
+    def test_multilabel_with_missing_labels(self):
+        """Score available binary labels and ignore missing entries."""
         evaluator = TBEvaluator(
             task="multilabel classification",
             num_classes=3,
             metrics=["accuracy"]
         )
         
-        with pytest.raises(NotImplementedError, match="Multilabel classification"):
-            evaluator.update({
-                "logits": torch.tensor([[1, 0, 0], [0, 1, 1]]),
-                "labels": torch.tensor([[1, 1, 0], [0, 1, 1]])
-            })
+        evaluator.update({
+            "logits": torch.tensor([[2.0, -2.0, -2.0], [-2.0, 2.0, 2.0]]),
+            "labels": torch.tensor([[1.0, float("nan"), 0.0], [0.0, 1.0, 1.0]])
+        })
+        assert evaluator.compute()["accuracy"] == pytest.approx(1.0)
 
     def test_reset(self):
         """Test the reset method."""

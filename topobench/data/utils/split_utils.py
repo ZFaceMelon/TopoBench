@@ -4,9 +4,44 @@ import os
 
 import numpy as np
 import torch
-from sklearn.model_selection import StratifiedKFold
+from sklearn.model_selection import StratifiedKFold, train_test_split
 
 from topobench.dataloader import DataloadDataset
+
+
+def stratified_split(labels, parameters):
+    """Historical two-stage stratified split with explicit seed and proportions."""
+    labels = np.asarray(labels).reshape(-1)
+    indices = np.arange(len(labels))
+    train, heldout = train_test_split(
+        indices,
+        train_size=parameters.train_prop,
+        random_state=parameters.data_seed,
+        stratify=labels,
+    )
+    valid, test = train_test_split(
+        heldout,
+        test_size=0.5,
+        random_state=parameters.data_seed,
+        stratify=labels[heldout],
+    )
+    return {"train": train, "valid": valid, "test": test}
+
+
+def imported_split(labels, parameters):
+    """Read explicit split IDs, rejecting overlap, duplicates and missing IDs."""
+    with np.load(parameters.split_file, allow_pickle=False) as saved:
+        splits = {
+            key: np.asarray(saved[key]) for key in ("train", "valid", "test")
+        }
+    all_ids = np.concatenate(list(splits.values()))
+    if all_ids.ndim != 1 or not np.issubdtype(all_ids.dtype, np.integer):
+        raise ValueError("Split IDs must be one-dimensional integers")
+    if not np.array_equal(np.sort(all_ids), np.arange(len(labels))):
+        raise ValueError(
+            "Imported splits must partition the dataset exactly once"
+        )
+    return splits
 
 
 # Generate splits in different fasions
@@ -333,6 +368,12 @@ def load_inductive_splits(dataset, parameters):
 
     elif parameters.split_type == "fixed" and hasattr(dataset, "split_idx"):
         split_idx = dataset.split_idx
+
+    elif parameters.split_type == "stratified":
+        split_idx = stratified_split(labels, parameters)
+
+    elif parameters.split_type == "imported":
+        split_idx = imported_split(labels, parameters)
 
     else:
         raise NotImplementedError(

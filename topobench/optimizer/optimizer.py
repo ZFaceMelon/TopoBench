@@ -29,7 +29,11 @@ class TBOptimizer(AbstractOptimizer):
         self.optimizer = functools.partial(
             TORCH_OPTIMIZERS[optimizer_id], **parameters
         )
-        if scheduler is not None:
+        if callable(scheduler):
+            self.monitor = "val/loss"
+            self.scheduler = scheduler
+        elif scheduler is not None:
+            self.monitor = scheduler.get("monitor", "val/loss")
             scheduler_id = scheduler.get("scheduler_id")
             scheduler_params = scheduler.get("scheduler_params")
             self.scheduler = functools.partial(
@@ -39,10 +43,17 @@ class TBOptimizer(AbstractOptimizer):
             self.scheduler = None
 
     def __repr__(self) -> str:
+        def name(factory):
+            # functools.partial exposes the wrapped callable as ``func``.
+            factory = getattr(factory, "func", factory)
+            return getattr(factory, "__name__", type(factory).__name__)
+
         if self.scheduler is not None:
-            return f"{self.__class__.__name__}(optimizer={self.optimizer.__name__}, scheduler={self.scheduler.__name__})"
+            return f"{self.__class__.__name__}(optimizer={name(self.optimizer)}, scheduler={name(self.scheduler)})"
         else:
-            return f"{self.__class__.__name__}(optimizer={self.optimizer.__name__})"
+            return (
+                f"{self.__class__.__name__}(optimizer={name(self.optimizer)})"
+            )
 
     def configure_optimizer(self, model_parameters) -> dict[str:Any]:
         """Configure the optimizer and scheduler.
@@ -67,7 +78,7 @@ class TBOptimizer(AbstractOptimizer):
                 "optimizer": optimizer,
                 "lr_scheduler": {
                     "scheduler": scheduler,
-                    "monitor": "val/loss",
+                    "monitor": self.monitor,
                     "interval": "epoch",
                     "frequency": 1,
                 },
