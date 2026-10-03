@@ -102,7 +102,6 @@ def write_run_manifest(config, model, datamodule):
         "supervised_initial_state_sha256": tensor_digest(
             model.state_dict().items()
         ),
-        "historical_score_reproduction_verified": False,
     }
     package = Path(__file__).resolve().parents[1]
     sources = set(package.rglob("trawl*.py"))

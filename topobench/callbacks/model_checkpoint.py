@@ -18,8 +18,8 @@ class RankedModelCheckpoint(ModelCheckpoint):
     def _select_latest_kth(self):
         """Evict the most recent of several tied worst checkpoints.
 
-        Lightning evicts the earliest tied entry. Historical TRAWL top-K
-        ranked ties by earlier epoch, so later tied checkpoints leave first.
+        Lightning evicts the earliest tied entry; here ties are ranked by
+        earlier epoch, so later tied checkpoints leave first.
         """
         if self.save_top_k < 1 or len(self.best_k_models) < self.save_top_k:
             return

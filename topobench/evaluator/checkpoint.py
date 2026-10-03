@@ -109,12 +109,7 @@ class PredictionEnsemble(nn.Module):
         predictions = []
         for pipeline in self.members:
             member_batch = batch.clone()
-            backbone = pipeline["backbone"]
-            if hasattr(backbone, "sampling_context"):
-                backbone.sampling_context["stage"] = batch.get(
-                    "model_state", "Test"
-                )
-            output = backbone(pipeline["encoder"](member_batch))
+            output = pipeline["backbone"](pipeline["encoder"](member_batch))
             output = pipeline["readout"](output, member_batch)
             predictions.append(output["logits"])
         output["logits"] = torch.stack(predictions).mean(dim=0)

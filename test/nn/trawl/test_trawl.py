@@ -12,14 +12,14 @@ from hydra.utils import instantiate
 from torch_geometric.data import Data
 
 from topobench.data.utils.trawl.encodings import positional_encodings
-from topobench.data.utils.trawl.sampling import sample_walks
+from topobench.data.utils.trawl.sampling import WalkSampler
 from topobench.dataloader import DataloadDataset
 from topobench.dataloader.utils import collate_fn
 from topobench.evaluator import TBEvaluator
 from topobench.loss.dataset.DatasetLoss import DatasetLoss
 from topobench.model.trawl_pretraining import TRAWLPretrainer
-from topobench.nn.backbones.combinatorial.trawl import TRAWL
 from topobench.nn.backbones.combinatorial.trawl import (
+    TRAWL,
     PureTorchMambaBlock,
 )
 from topobench.nn.readouts.trawl import TRAWLReadout
@@ -174,12 +174,12 @@ def test_mamba_scan_parity():
 
 def test_walk_budget_nonbacktracking_and_reversal():
     matrix = sp.csr_matrix(np.ones((3, 3)) - np.eye(3))
-    paths = sample_walks(matrix, k=8, length=10, reverse=True)
+    paths = WalkSampler(0)(matrix, k=8, length=10, reverse=True)
     assert paths.shape == (16, 10)
     np.testing.assert_array_equal(paths[8:], paths[:8, ::-1])
     assert np.all(paths[:8, 2:] != paths[:8, :-2])
     np.testing.assert_array_equal(
-        paths, sample_walks(matrix, k=8, length=10, reverse=True)
+        paths, WalkSampler(0)(matrix, k=8, length=10, reverse=True)
     )
 
 

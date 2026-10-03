@@ -1,4 +1,4 @@
-"""Weighted non-backtracking walks with historical coverage starts."""
+"""Weighted non-backtracking random walks with coverage-biased starts."""
 
 import hashlib
 import json
@@ -62,7 +62,8 @@ class WalkSampler:
             Keyword arguments for ``guided_transition``; plain ``transition``
             is used when empty (default: None).
         **kwargs : dict
-            Sampling options forwarded to ``sample_neighbors``.
+            Options forwarded to ``sample_neighbors`` (``k``, ``length``,
+            ``seed``, ``start_policy``, ``epsilon``, ``reverse``).
 
         Returns
         -------
@@ -84,8 +85,8 @@ class WalkSampler:
             json.dumps(dict(guidance or {}), sort_keys=True),
         )
         if key in self.cache:
-            active, neighbors, probs = self.cache.pop(key)
-            self.cache[key] = (active, neighbors, probs)
+            active, neighbors, probs, rows = self.cache.pop(key)
+            self.cache[key] = (active, neighbors, probs, rows)
         else:
             active = np.flatnonzero(
                 np.asarray((matrix + matrix.T).sum(axis=1)).ravel() > 0
@@ -97,97 +98,36 @@ class WalkSampler:
                 guided_transition(subgraph, **guidance)
                 if guidance
                 else transition(subgraph)
-            ).tocsr()
-            neighbors = [
-                p.indices[p.indptr[i] : p.indptr[i + 1]].tolist()
-                for i in range(len(active))
-            ]
-            probs = [
-                p.data[p.indptr[i] : p.indptr[i + 1]].tolist()
-                for i in range(len(active))
-            ]
+            )
+            neighbors, probs = csr_rows(p)
+            rows = prepare_walk_rows(neighbors, probs)
             if self.cache_size:
-                self.cache[key] = (active, neighbors, probs)
+                self.cache[key] = (active, neighbors, probs, rows)
                 if len(self.cache) > self.cache_size:
                     self.cache.popitem(last=False)
-        return active[sample_neighbors(neighbors, probs, **kwargs)]
+        return active[sample_neighbors(neighbors, probs, rows=rows, **kwargs)]
 
 
-def sample_walks(
-    matrix,
-    k=32,
-    length=32,
-    seed=0,
-    start_policy="coverage",
-    epsilon=0.05,
-    reverse=False,
-    guidance=None,
-):
-    """Sample exactly K paths, optionally followed by their reversals.
-
-    Return graph-local state IDs. Empty relations return no walks; inactive
-    states cannot consume their budget. Coverage is the historical inverse
-    visitation start policy, not adaptive stopping.
+def csr_rows(matrix):
+    """Split a CSR matrix into per-row column and value lists.
 
     Parameters
     ----------
     matrix : scipy.sparse.spmatrix
-        Square weighted relation matrix over graph-local states.
-    k : int, optional
-        Number of walks to sample (default: 32).
-    length : int, optional
-        Number of states per walk (default: 32).
-    seed : int, optional
-        Seed for the random generator (default: 0).
-    start_policy : str, optional
-        Start-state policy, ``"uniform"`` or ``"coverage"``
-        (default: "coverage").
-    epsilon : float, optional
-        Coverage-change threshold below which coverage starts fall back to
-        uniform starts (default: 0.05).
-    reverse : bool, optional
-        If True, append the reversal of every walk (default: False).
-    guidance : dict, optional
-        Keyword arguments for ``guided_transition``; plain ``transition`` is
-        used when empty (default: None).
+        Sparse matrix.
 
     Returns
     -------
-    numpy.ndarray
-        Walks of graph-local state IDs with shape ``(num_walks, length)``.
+    tuple of list
+        ``(neighbors, probs)``: column indices and values of each row.
     """
-    from topobench.data.utils.trawl.encodings import (
-        guided_transition,
-        transition,
-    )
-
-    if k < 1 or length < 1 or start_policy not in {"uniform", "coverage"}:
-        raise ValueError("Invalid walk budget, length or start policy")
-    active = np.flatnonzero(
-        np.asarray((matrix + matrix.T).sum(axis=1)).ravel() > 0
-    )
-    if not len(active):
-        return np.empty((0, length), dtype=np.int64)
-    subgraph = matrix[active][:, active]
-    p = (
-        guided_transition(subgraph, **guidance)
-        if guidance
-        else transition(subgraph)
-    )
-    p = p.tocsr()
-    neighbors = [
-        p.indices[p.indptr[i] : p.indptr[i + 1]].tolist()
-        for i in range(len(active))
-    ]
-    probs = [
-        p.data[p.indptr[i] : p.indptr[i + 1]].tolist()
-        for i in range(len(active))
-    ]
-    return active[
-        sample_neighbors(
-            neighbors, probs, k, length, seed, start_policy, epsilon, reverse
-        )
-    ]
+    matrix = matrix.tocsr()
+    bounds = zip(matrix.indptr[:-1], matrix.indptr[1:], strict=True)
+    neighbors, probs = [], []
+    for start, stop in bounds:
+        neighbors.append(matrix.indices[start:stop].tolist())
+        probs.append(matrix.data[start:stop].tolist())
+    return neighbors, probs
 
 
 def sample_neighbors(
@@ -199,13 +139,12 @@ def sample_neighbors(
     start_policy="coverage",
     epsilon=0.05,
     reverse=False,
-    branch_split=None,
     rows=None,
 ):
-    """Historical sampler preserving the supplied neighbor ordering exactly.
+    """Sample ``k`` non-backtracking walks over adjacency lists.
 
-    ``rows`` may carry ``prepare_walk_rows(neighbors, probs)`` computed once
-    for a graph that is sampled repeatedly.
+    Coverage starts favour rarely visited states until coverage stops
+    growing by ``epsilon``, then fall back to uniform starts.
 
     Parameters
     ----------
@@ -227,10 +166,6 @@ def sample_neighbors(
         uniform starts (default: 0.05).
     reverse : bool, optional
         If True, append the reversal of every walk (default: False).
-    branch_split : int, optional
-        If given, the first ``k // 2`` walks start in states
-        ``[0, branch_split)`` and the rest in ``[branch_split, n)``
-        (default: None).
     rows : WalkRows, optional
         Precomputed output of ``prepare_walk_rows`` (default: None).
 
@@ -249,31 +184,19 @@ def sample_neighbors(
     visits = np.zeros(len(neighbors), dtype=np.float64)
     previous = 0.0
     paths = []
-    for walk in range(k):
-        lo, hi = 0, len(neighbors)
-        if branch_split is not None:
-            if not 0 < branch_split < len(neighbors) or k < 2:
-                raise ValueError(
-                    "Two-branch sampling requires nonempty branches and K >= 2"
-                )
-            if walk < k // 2:
-                hi = branch_split
-            else:
-                lo = branch_split
+    for _ in range(k):
         if start_policy == "coverage" and visits.sum() > 0:
             coverage = float((visits > 0).mean())
             if abs(coverage - previous) < epsilon:
-                start = int(rng.integers(lo, hi))
+                start = int(rng.integers(0, len(neighbors)))
             else:
                 weights = 1 / (1 + visits)
-                weights[:lo] = 0
-                weights[hi:] = 0
                 start = int(
                     rng.choice(len(neighbors), p=weights / weights.sum())
                 )
             previous = coverage
         else:
-            start = int(rng.integers(lo, hi))
+            start = int(rng.integers(0, len(neighbors)))
         path = simulate_nbrw_sparse(
             neighbors, probs, start, length, rng, rows=rows
         )

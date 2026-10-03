@@ -6,7 +6,7 @@ from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
 def warmup_cosine(
     optimizer, epochs, warmup_epochs=10, start_factor=0.01, eta_min=1e-6
 ):
-    """Construct the historical linear-warmup then cosine epoch schedule.
+    """Construct a linear-warmup then cosine epoch schedule.
 
     Parameters
     ----------

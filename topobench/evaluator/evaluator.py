@@ -135,8 +135,8 @@ class TBEvaluator(AbstractEvaluator):
 
         elif self.task == "classification":
             if preds.ndim == 2 and preds.shape[-1] == 1:
-                # Preserve historical one-logit BCE with ordinary two-class
-                # metrics. Pass probabilities: torchmetrics applies softmax per
+                # Score one-logit BCE with ordinary two-class metrics.
+                # Pass probabilities: torchmetrics applies softmax per
                 # update only when some value lies outside [0, 1], so padded
                 # raw logits would be scored inconsistently across batches.
                 positive = preds.float().sigmoid()

@@ -12,16 +12,9 @@ from topobench.data.utils.trawl.encodings import (
     guided_transition,
     positional_encodings,
 )
-from topobench.data.utils.trawl.sampling import sample_walks
-from topobench.nn.backbones.combinatorial.trawl import TRAWL
-from topobench.nn.backbones.combinatorial.trawl import make_layer
-from topobench.nn.backbones.combinatorial.trawl import CategoricalTRAWL
-from topobench.nn.backbones.combinatorial.trawl import ContinuousTRAWL
-from topobench.transforms.data_manipulations.trawl_historical import (
-    HistoricalCellTransform,
-)
+from topobench.data.utils.trawl.sampling import WalkSampler
+from topobench.nn.backbones.combinatorial.trawl import TRAWL, make_layer
 
-from .test_integration import TinyDataset
 from .test_trawl import collate, prepare
 
 
@@ -48,8 +41,7 @@ def test_cpu_autocast_accumulation(occurrence_pooling, walk_scope):
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 @pytest.mark.parametrize("architecture", ["mamba", "sisa", "hybrid"])
-@pytest.mark.parametrize("profile", ["base", "continuous", "categorical"])
-def test_cuda_parity_and_amp_step(architecture, profile):
+def test_cuda_parity_and_amp_step(architecture):
     torch.manual_seed(42)
     options = dict(
         hidden_dim=16,
@@ -59,14 +51,8 @@ def test_cuda_parity_and_amp_step(architecture, profile):
         walk_refresh="fixed",
         checkpoint_layers=True,
     )
-    if profile == "base":
-        graphs = [prepare(), prepare()]
-        cpu = TRAWL(**options)
-    else:
-        transform = HistoricalCellTransform(split_seeds=False, rwse_samples=2)
-        graphs = [transform(TinyDataset()[i]) for i in range(2)]
-        cls = ContinuousTRAWL if profile == "continuous" else CategoricalTRAWL
-        cpu = cls(pe_dim=32, max_rank=1, num_neighborhoods=1, **options)
+    graphs = [prepare(), prepare()]
+    cpu = TRAWL(**options)
     cpu.initialize(graphs)
     cpu.eval()
     gpu = copy.deepcopy(cpu).cuda()
@@ -118,7 +104,7 @@ def test_large_sparse_graph_and_spectral_limit():
     encoding = positional_encodings(matrix, rw_steps=2, rw_samples=2)
     assert encoding.shape == (n, 4)
     assert np.isfinite(encoding).all()
-    paths = sample_walks(matrix, k=32, length=32)
+    paths = WalkSampler(0)(matrix, k=32, length=32)
     assert paths.shape == (32, 32)
     assert ((paths >= 0) & (paths < n)).all()
     with pytest.raises(ValueError, match="dense_limit"):
@@ -128,8 +114,7 @@ def test_large_sparse_graph_and_spectral_limit():
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
-@pytest.mark.parametrize("profile", ["base", "continuous", "categorical"])
-def test_official_mamba_backend(profile):
+def test_official_mamba_backend():
     pytest.importorskip("mamba_ssm")
     options = dict(
         hidden_dim=32,
@@ -145,14 +130,8 @@ def test_official_mamba_backend(profile):
         walks={"k": 3, "length": 8},
         checkpoint_layers=True,
     )
-    if profile == "base":
-        graphs = [prepare(), prepare()]
-        model = TRAWL(**options)
-    else:
-        transform = HistoricalCellTransform(split_seeds=False, rwse_samples=2)
-        graphs = [transform(TinyDataset()[i]) for i in range(2)]
-        cls = ContinuousTRAWL if profile == "continuous" else CategoricalTRAWL
-        model = cls(pe_dim=32, max_rank=1, num_neighborhoods=1, **options)
+    graphs = [prepare(), prepare()]
+    model = TRAWL(**options)
     model.initialize(graphs)
     model.cuda().train()
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
@@ -194,23 +173,16 @@ def test_compiled_cuda_layer(kind):
     not torch.cuda.is_available() or sys.platform == "win32",
     reason="Linux CUDA compiler validation",
 )
-def test_categorical_compilation_uses_residual_path():
-    transform = HistoricalCellTransform(split_seeds=False, rwse_samples=2)
-    graphs = [transform(TinyDataset()[i]) for i in range(2)]
-    eager = (
-        CategoricalTRAWL(
-            hidden_dim=32,
-            depth=1,
-            architecture="mamba",
-            pe_dim=32,
-            max_rank=1,
-            num_neighborhoods=1,
-            walks={"k": 3, "length": 8},
-        )
-        .cuda()
-        .eval()
+def test_compiled_backbone_layers():
+    graphs = [prepare(), prepare()]
+    eager = TRAWL(
+        hidden_dim=32,
+        depth=1,
+        architecture="mamba",
+        walks={"k": 3, "length": 8},
     )
     eager.initialize(graphs)
+    eager.cuda().eval()
     compiled = copy.deepcopy(eager)
     for layer in compiled.encoders[0]:
         layer.compile(fullgraph=True)

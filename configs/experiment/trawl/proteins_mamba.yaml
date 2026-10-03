@@ -1,6 +1,6 @@
 # @package _global_
 defaults:
-  - /experiment/trawl/continuous
+  - /experiment/trawl/recipe
   - override /dataset: graph/PROTEINS
 
 model:

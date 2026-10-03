@@ -215,16 +215,6 @@ def run(cfg: DictConfig) -> tuple[dict[str, Any], dict[str, Any]]:
     dataset_train, dataset_val, dataset_test = (
         preprocessor.load_dataset_splits(cfg.dataset.split_params)
     )
-    # Optional transforms whose random features depend on split-local IDs.
-    # They cache their exact output next to the preprocessed data.
-    split_cache = getattr(preprocessor, "processed_data_dir", dataset_dir)
-    for wrapped in getattr(preprocessor.pre_transform, "transforms", []):
-        prepare_split = getattr(wrapped.transform, "prepare_split", None)
-        if prepare_split is not None:
-            for offset, split in enumerate(
-                (dataset_train, dataset_val, dataset_test)
-            ):
-                prepare_split(split, offset, cache_dir=split_cache)
     # Prepare datamodule
     log.info("Instantiating datamodule...")
     if cfg.dataset.parameters.task_level in ["node", "graph"]:

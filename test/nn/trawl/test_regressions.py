@@ -2,15 +2,12 @@
 
 import numpy as np
 import pytest
-import scipy.sparse as sp
 import torch
 from omegaconf import OmegaConf
 from sklearn.metrics import roc_auc_score
 from torch import nn
-from torch_geometric.data import Data
 
 from topobench.callbacks.model_checkpoint import RankedModelCheckpoint
-from topobench.data.utils.trawl import legacy_features, legacy_laplacian
 from topobench.data.utils.trawl.sampling import walk_seed
 from topobench.dataloader.samplers import (
     EpochRandomSampler,
@@ -22,15 +19,10 @@ from topobench.model.trawl_pretraining import (
     validation_frequency,
 )
 from topobench.nn.backbones.combinatorial.trawl import SISALayer
-from topobench.nn.backbones.combinatorial.trawl import ContinuousTRAWL
 from topobench.nn.readouts.trawl import TRAWLReadout
 from topobench.optimizer import TBOptimizer
 from topobench.run import enable_unused_parameter_detection
-from topobench.transforms.data_manipulations.trawl_historical import (
-    HistoricalCellTransform,
-)
 
-from .test_integration import TinyDataset
 from .test_trawl import collate
 
 
@@ -188,30 +180,6 @@ def test_walk_seed_is_collision_free():
     assert len(seeds) == 200 * 3 * 3
 
 
-def test_bond_types_from_one_hot_edge_attributes():
-    data = Data(
-        edge_index=torch.tensor([[0, 1, 1, 2], [1, 0, 2, 1]]),
-        edge_attr=torch.tensor(
-            [[0, 0, 1, 0], [0, 0, 1, 0], [0, 1, 0, 0], [0, 1, 0, 0]]
-        ).float(),
-        num_nodes=3,
-    )
-    _, weights, types = legacy_features.unique_undirected_bonds(data)
-    assert types == [2, 1] and weights == [3.0, 2.0]
-    data.edge_attr = torch.tensor([[2.0], [2.0], [1.0], [1.0]])
-    assert legacy_features.unique_undirected_bonds(data)[2] == [2, 1]
-
-
-def test_atom_types_skip_continuous_attributes():
-    data = Data(x=torch.tensor([[9.5, 0, 1, 0], [0.2, 1, 0, 0]]), num_nodes=2)
-    # Without attr_dim the continuous column 0 wins the first argmax.
-    assert legacy_features.extract_atom_types(data).tolist() == [0, 1]
-    assert legacy_features.extract_atom_types(data, attr_dim=1).tolist() == [
-        1,
-        0,
-    ]
-
-
 def test_tu_loader_caches_attribute_variants_separately():
     from topobench.data.loaders.graph.tu_datasets import TUDatasetLoader
 
@@ -222,22 +190,6 @@ def test_tu_loader_caches_attribute_variants_separately():
     ).get_data_dir()
     assert plain.endswith("PROTEINS") and attributes != plain
     assert attributes.endswith("_node_attr")
-
-
-def test_stationary_distribution_covers_disconnected_components():
-    # A bipartite path component and a triangle: lambda=-1 and a repeated
-    # lambda=1 must not zero out either component.
-    blocks = [
-        np.array([[0, 1, 0], [0.5, 0, 0.5], [0, 1, 0]]),
-        np.full((3, 3), 0.5) - np.eye(3) * 0.5,
-    ]
-    P = sp.csr_matrix(sp.block_diag(blocks))
-    for _ in range(10):
-        pi = legacy_laplacian.compute_stationary_distribution(P)
-        assert pi.sum() == pytest.approx(1)
-        assert pi[:3].sum() == pytest.approx(0.5)
-        assert (pi > 1e-6).all()
-        np.testing.assert_allclose(pi @ P.toarray(), pi, atol=1e-8)
 
 
 def test_sisa_wide_decay_matches_and_stays_finite():
@@ -274,42 +226,6 @@ def test_trawl_ddp_strategy_handles_unused_parameters():
     )
     enable_unused_parameter_detection(other)
     assert other.trainer.strategy == "ddp"
-
-
-def _continuous(**kwargs):
-    return ContinuousTRAWL(
-        hidden_dim=16,
-        depth=1,
-        architecture="mlp",
-        max_rank=1,
-        num_neighborhoods=1,
-        walks={"k": 3, "length": 5},
-        **kwargs,
-    )
-
-
-def test_ssl_reconstruction_scores_one_view():
-    graphs = [
-        HistoricalCellTransform(split_seeds=False, rwse_samples=2)(
-            TinyDataset()[0]
-        )
-    ]
-    net = _continuous(eval_views=3).eval()
-    batch = collate(graphs)
-    assert len(net._walk_inputs(batch)[0]) == 9
-    assert len(net._walk_inputs(batch, views=1)[0]) == 3
-    calls = []
-    original = net._walk_inputs
-    net._walk_inputs = lambda batch, views=None: (
-        calls.append(views) or original(batch, views)
-    )
-    net.reconstruction_loss(batch, mask_ratio=0)
-    assert calls == [1]
-
-
-def test_branch_gate_requires_historical_sampling():
-    with pytest.raises(ValueError, match="historical"):
-        _continuous(branch_gate={"prior": 0.7})
 
 
 def _cpu_autocast_enabled():
@@ -393,28 +309,6 @@ def test_late_metrics_keep_existing_csv_columns(tmp_path):
     )
     for key in ("val/accuracy", "epoch", "test_best_rerun/accuracy"):
         assert key in header
-
-
-def test_spectral_features_do_not_depend_on_solver_history():
-    # A 40-state cycle with chords is large enough for the ARPACK path.
-    neighbors, probabilities = [], []
-    for i in range(40):
-        nbrs = [(i - 1) % 40, (i + 1) % 40] + (
-            [(i + 7) % 40] if i % 5 == 0 else []
-        )
-        neighbors.append(nbrs)
-        probabilities.append([1.0 / len(nbrs)] * len(nbrs))
-
-    def features():
-        return legacy_features.hasse_spectral_pse(neighbors, probabilities)
-
-    first = features()
-    # Unrelated solves advance ARPACK's internal start-vector state.
-    for size in (30, 50):
-        cycle = sp.diags([1, 1], [-1, 1], shape=(size, size)).tocsr()
-        cycle[0, size - 1] = cycle[size - 1, 0] = 1
-        legacy_laplacian.compute_stationary_distribution(cycle / 2)
-    np.testing.assert_array_equal(first, features())
 
 
 def test_deterministic_flag_survives_trainer_construction():
@@ -513,34 +407,6 @@ def test_fast_walks_match_generator_choice():
             neighbors, weights, start, 32, fast_rng
         ) == reference(neighbors, weights, start, 32, slow_rng)
         assert fast_rng.bit_generator.state == slow_rng.bit_generator.state
-
-
-def test_historical_split_cache_is_exact(tmp_path):
-    from topobench.dataloader import DataloadDataset
-
-    def build(cache_dir):
-        dataset = DataloadDataset([TinyDataset()[i] for i in range(6)])
-        HistoricalCellTransform(rwse_samples=2).prepare_split(
-            dataset, 1, cache_dir=cache_dir
-        )
-        return dataset.data_lst
-
-    reference = build(None)
-    written = build(tmp_path)
-    assert list((tmp_path / "trawl_historical").glob("*.pt"))
-    loaded = build(tmp_path)
-    for graphs in (written, loaded):
-        for a, b in zip(reference, graphs, strict=True):
-            assert sorted(a.keys()) == sorted(b.keys())
-            for key in sorted(a.keys()):
-                if torch.is_tensor(a[key]):
-                    assert torch.equal(a[key], b[key]), key
-    # Different settings never reuse another configuration's cache.
-    other = DataloadDataset([TinyDataset()[i] for i in range(6)])
-    HistoricalCellTransform(rwse_samples=3).prepare_split(
-        other, 1, cache_dir=tmp_path
-    )
-    assert len(list((tmp_path / "trawl_historical").glob("*.pt"))) == 2
 
 
 def test_compiled_walks_match_pure_python():

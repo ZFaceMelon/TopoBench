@@ -5,6 +5,7 @@ import scipy.linalg
 import scipy.sparse as sp
 
 from topobench.data.utils.trawl.sampling import (
+    csr_rows,
     prepare_walk_rows,
     simulate_nbrw_sparse,
 )
@@ -184,12 +185,7 @@ def positional_encodings(
         )
     p = transition(matrix).tocsr()
     if rw_steps:
-        neighbors = [
-            p.indices[p.indptr[i] : p.indptr[i + 1]].tolist() for i in range(n)
-        ]
-        probs = [
-            p.data[p.indptr[i] : p.indptr[i + 1]].tolist() for i in range(n)
-        ]
+        neighbors, probs = csr_rows(p)
         rng = np.random.default_rng(seed)
         rows = prepare_walk_rows(neighbors, probs)
         rw = np.zeros((n, rw_steps))

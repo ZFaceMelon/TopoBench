@@ -16,46 +16,6 @@ from torch.nn import functional as F
 from topobench.model.model import HostBatchTransferMixin
 
 
-def historical_accumulation_weight(module, batch, batch_idx):
-    """Match sample-weighted logical batches, including a short final batch.
-
-    Lightning divides every microbatch loss by the configured accumulation
-    count. Historical TRAWL divides by the actual logical batch sample count.
-
-    Parameters
-    ----------
-    module : lightning.LightningModule
-        Module being trained; its attached trainer supplies the loader and
-        accumulation settings.
-    batch : torch_geometric.data.Data
-        Current microbatch carrying ``trawl_counts``.
-    batch_idx : int
-        Index of the microbatch within the epoch.
-
-    Returns
-    -------
-    float
-        Factor applied to the microbatch loss (1.0 without accumulation).
-    """
-    trainer = module._trainer
-    if trainer is None or trainer.accumulate_grad_batches == 1:
-        return 1.0
-    loader = trainer.train_dataloader
-    if not hasattr(loader, "sampler") or loader.batch_size is None:
-        raise ValueError(
-            "Historical accumulation requires a sized batch loader"
-        )
-    accumulation = trainer.accumulate_grad_batches
-    batch_size = loader.batch_size
-    samples = len(loader.sampler)
-    if loader.drop_last:
-        samples = samples // batch_size * batch_size
-    samples = min(samples, int(trainer.num_training_batches) * batch_size)
-    logical_start = (batch_idx // accumulation) * accumulation * batch_size
-    logical_size = min(accumulation * batch_size, samples - logical_start)
-    return len(batch.trawl_counts) * accumulation / logical_size
-
-
 class FullPrecisionValidation:
     """Optionally run validation steps with autocast disabled."""
 
@@ -474,100 +434,6 @@ class TRAWLPretrainer(
         }
 
 
-class ContinuousPretrainer(TRAWLPretrainer):
-    """Original walk-mean signal/PSE/absolute-step reconstruction objective.
-
-    Parameters
-    ----------
-    backbone : torch.nn.Module
-        Continuous TRAWL backbone providing ``reconstruction_loss``.
-    lr : float, optional
-        AdamW learning rate (default: 1e-4).
-    weight_decay : float, optional
-        AdamW weight decay (default: 1e-3).
-    mask_probability : float, optional
-        Training mask ratio passed to ``reconstruction_loss``
-        (default: 0.15).
-    **kwargs : dict
-        Ignored ``TRAWLPretrainer`` options (e.g. ``objectives``).
-    """
-
-    def __init__(
-        self,
-        backbone,
-        lr=1e-4,
-        weight_decay=1e-3,
-        mask_probability=0.15,
-        **kwargs,
-    ):
-        LightningModule.__init__(self)
-        self.backbone = backbone
-        self.lr, self.weight_decay = lr, weight_decay
-        self.mask_probability = mask_probability
-
-    def _step(self, batch, validation=False, batch_idx=0):
-        """Set the sampling context and compute the reconstruction loss.
-
-        Parameters
-        ----------
-        batch : torch_geometric.data.Data
-            Batch of TRAWL-transformed graphs.
-        validation : bool, optional
-            If True, disable masking and log the validation loss
-            (default: False).
-        batch_idx : int, optional
-            Index of the microbatch (default: 0).
-
-        Returns
-        -------
-        torch.Tensor
-            Reconstruction loss.
-        """
-        accumulation = (
-            self.trainer.accumulate_grad_batches
-            if self._trainer is not None
-            else 1
-        )
-        self.backbone.sampling_context.update(
-            epoch=self.current_epoch + 1,
-            batch=batch_idx // accumulation,
-            microbatch=batch_idx % accumulation,
-            seed_offset=10000,
-            rank=self.global_rank,
-            stage="Validation" if validation else "Training",
-        )
-        loss = self.backbone.reconstruction_loss(
-            batch, mask_ratio=0 if validation else self.mask_probability
-        )
-        self.log(
-            "pretrain/val_loss" if validation else "pretrain/train_loss",
-            loss,
-            on_step=False,
-            on_epoch=True,
-            batch_size=len(batch.trawl_counts),
-            sync_dist=True,
-        )
-        return loss
-
-    def training_step(self, batch, batch_idx):
-        """Compute the training loss with historical accumulation weighting.
-
-        Parameters
-        ----------
-        batch : torch_geometric.data.Data
-            Training batch.
-        batch_idx : int
-            Index of the microbatch.
-
-        Returns
-        -------
-        torch.Tensor
-            Weighted training loss.
-        """
-        loss = self._step(batch, batch_idx=batch_idx)
-        return loss * historical_accumulation_weight(self, batch, batch_idx)
-
-
 def run_pretraining(
     model, datamodule, config, trainer_config, output_dir=None
 ):
@@ -597,9 +463,6 @@ def run_pretraining(
         raise ValueError(
             "The TRAWL pretraining config requires a TRAWL backbone"
         )
-    from topobench.nn.backbones.combinatorial.trawl import (
-        ContinuousTRAWL,
-    )
     from topobench.nn.encoders.trawl import TRAWLFeatureEncoder
 
     encoder = model.feature_encoder
@@ -607,19 +470,7 @@ def run_pretraining(
         raise ValueError(
             "Wrap a native rank encoder in TRAWLFeatureEncoder for pretraining"
         )
-    if isinstance(model.backbone, ContinuousTRAWL) and not isinstance(
-        encoder, nn.Identity
-    ):
-        raise ValueError(
-            "Historical input profiles use their own encoder; select base TRAWL for a native feature encoder"
-        )
-
-    pretrainer = (
-        ContinuousPretrainer
-        if isinstance(model.backbone, ContinuousTRAWL)
-        else TRAWLPretrainer
-    )
-    module = pretrainer(
+    module = TRAWLPretrainer(
         model.backbone,
         lr=config.lr,
         weight_decay=config.weight_decay,
@@ -631,9 +482,7 @@ def run_pretraining(
                 1
             ]
             for rank in range(model.backbone.max_rank + 1)
-        ]
-        if not isinstance(model.backbone, ContinuousTRAWL)
-        else None,
+        ],
     )
     destination = (
         Path(output_dir) / "pretraining" if output_dir is not None else None
@@ -677,20 +526,7 @@ def run_pretraining(
             num_sanity_val_steps=0,
             enable_checkpointing=True,
         )
-        original_seed = datamodule.order_seed
-        if (
-            isinstance(module, ContinuousPretrainer)
-            and original_seed is not None
-        ):
-            datamodule.order_seed = original_seed + 10000
-        try:
-            trainer.fit(
-                module,
-                datamodule=datamodule,
-                ckpt_path=resume,
-            )
-        finally:
-            datamodule.order_seed = original_seed
+        trainer.fit(module, datamodule=datamodule, ckpt_path=resume)
         if checkpoint.best_model_path:
             state = torch.load(
                 checkpoint.best_model_path,

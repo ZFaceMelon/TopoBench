@@ -11,19 +11,9 @@ from hydra.utils import instantiate
 from omegaconf import OmegaConf
 from torch_geometric.data import Data, InMemoryDataset
 
-from topobench.model.trawl_pretraining import (
-    ContinuousPretrainer,
-    run_pretraining,
-)
-from topobench.nn.backbones.combinatorial.trawl import (
-    ContinuousTRAWL,
-)
+from topobench.model.trawl_pretraining import run_pretraining
+from topobench.nn.backbones.combinatorial.trawl import TRAWL
 from topobench.run import run
-from topobench.transforms.data_manipulations.trawl_historical import (
-    HistoricalCellTransform,
-)
-
-from .test_trawl import collate
 
 
 class TinyDataset(InMemoryDataset):
@@ -59,13 +49,10 @@ class TinyLoader:
         "nci1_hybrid",
         "nci1_sisa",
         "nci1_mamba",
-        "proteins_gated",
+        "zinc",
         "custom_layers",
-        "categorical",
         "adjacency",
         "mixed",
-        "joint",
-        "zinc_categorical",
     ],
 )
 def test_recipe_compiles(recipe):
@@ -83,46 +70,13 @@ def test_recipe_compiles(recipe):
             optimizer=cfg.optimizer,
             loss=cfg.loss,
         )
+        assert type(model.backbone) is TRAWL
         assert len(model.backbone.encoders[0]) == (
-            4 if recipe in {"categorical", "zinc_categorical"} else 5
+            4 if recipe == "zinc" else 5
         )
-        if recipe not in {
-            "custom_layers",
-            "adjacency",
-            "mixed",
-            "categorical",
-            "zinc_categorical",
-        }:
-            assert isinstance(model.backbone, ContinuousTRAWL)
+        if recipe.startswith(("proteins", "nci1")):
             assert cfg.dataset.split_params.split_type == "seeded_stratified"
-
-
-@pytest.mark.parametrize("rich", [False, True])
-def test_historical_features_encoder_and_ssl(rich):
-    dataset = TinyDataset()
-    transform = HistoricalCellTransform(
-        split_seeds=False, rich_features=rich, rwse_samples=2
-    )
-    graphs = [transform(dataset[i]) for i in range(2)]
-    dimension = 72 if rich else 32
-    assert graphs[0].trawl_pe.shape[1] == dimension
-    model = ContinuousTRAWL(
-        hidden_dim=16,
-        pe_dim=dimension,
-        max_rank=1,
-        num_neighborhoods=1,
-        architecture="hybrid",
-        depth=2,
-        walks={"k": 2, "length": 4},
-        sampling_protocol="historical",
-    )
-    model.initialize(graphs)
-    result = model(collate(graphs))
-    result["graph_embedding"].square().sum().backward()
-    assert result["x_0"].shape == (6, 16)
-    pretrainer = ContinuousPretrainer(model)
-    loss = pretrainer._step(collate(graphs))
-    assert torch.isfinite(loss)
+            assert cfg.transforms.lifting.max_cell_length == 6
 
 
 @pytest.mark.parametrize(
@@ -130,8 +84,8 @@ def test_historical_features_encoder_and_ssl(rich):
     [
         (False, "base", "best", 1),
         (True, "base", "best", 1),
-        (True, "historical", "weight_average", 1),
-        (False, "historical", "logit_ensemble", 1),
+        (True, "recipe", "weight_average", 1),
+        (False, "recipe", "logit_ensemble", 1),
         # Sparse validation: plateau schedulers must step only when validated.
         (True, "base", "best", 2),
     ],
@@ -169,9 +123,7 @@ def test_native_runner(
                 "model.backbone.walks.k=2",
                 "model.backbone.walks.length=4",
                 "model.backbone.walks.guidance=null",
-                "transforms.trawl.encodings.rw_samples=2"
-                if profile == "base"
-                else "transforms.historical.rwse_samples=2",
+                "transforms.trawl.encodings.rw_samples=2",
                 f"trainer={'gpu' if accelerator == 'gpu_ddp' else accelerator}",
                 "trainer.max_epochs=2",
                 f"trainer.check_val_every_n_epoch={check_val}",
@@ -211,7 +163,7 @@ def test_native_runner(
             assert list(
                 (tmp_path / "output/pretraining/metrics").glob("*/metrics.csv")
             )
-        if pretrain and profile == "historical" and accelerator == "cpu":
+        if pretrain and profile == "recipe" and accelerator == "cpu":
             datamodule = objects["datamodule"]
             original_seed = datamodule.order_seed
             cfg.pretraining.ckpt_path = str(
@@ -270,111 +222,3 @@ def test_native_runner(
                 Path(item["path"]).parent == relocated
                 for item in replay["selected_checkpoints"]
             )
-
-
-@pytest.mark.parametrize(
-    "lifting",
-    [
-        "champion",
-        "short_cycles",
-        "star",
-        "multiscale",
-        "cycle18_adj3",
-        "merged",
-        "gated",
-    ],
-)
-def test_extended_lifting(lifting, device="cpu"):
-    from topobench.nn.readouts.trawl import TRAWLReadout
-
-    transform = HistoricalCellTransform(
-        profile="extended",
-        lifting=lifting,
-        split_seeds=False,
-        rich_features=True,
-        rwse_samples=2,
-    )
-    graphs = [transform(TinyDataset()[0])]
-    batch = collate(graphs).to(device)
-    net = ContinuousTRAWL(
-        hidden_dim=16,
-        pe_dim=72,
-        depth=1,
-        architecture="mlp",
-        max_rank=1,
-        num_neighborhoods=1,
-        sampling_protocol="historical",
-        walks={"k": 4, "length": 5},
-        branch_gate={"prior": 0.7} if lifting == "gated" else None,
-    )
-    net.initialize(graphs)
-    net.to(device)
-    output = net(batch)
-    readout = TRAWLReadout(16, 1, graph_dim=32, aggregation="walk_logits").to(
-        device
-    )
-    output = readout(output, batch)
-    output["logits"].sum().backward()
-    assert torch.isfinite(output["logits"]).all()
-    if lifting == "gated":
-        torch.testing.assert_close(
-            output["walk_weights"].sum(),
-            output["walk_weights"].new_tensor(1.0),
-        )
-        assert net.branch_gate[-1].weight.grad is not None
-
-
-def test_categorical_forward_and_pretraining():
-    from topobench.nn.backbones.combinatorial.trawl import (
-        CategoricalTRAWL,
-    )
-    from topobench.nn.readouts.trawl import TRAWLReadout
-
-    transform = HistoricalCellTransform(
-        split_seeds=False,
-        rwse_samples=2,
-        spectral={
-            "heat_times": [],
-            "electrostatic_betas": [],
-            "laplacian_dim": 0,
-        },
-    )
-    graphs = [transform(TinyDataset()[0]), transform(TinyDataset()[1])]
-    batch = collate(graphs)
-    net = CategoricalTRAWL(
-        hidden_dim=16,
-        pe_dim=16,
-        depth=1,
-        architecture="mamba",
-        max_rank=1,
-        num_neighborhoods=1,
-        pooling="mean",
-        walks={"k": 3, "length": 5},
-    )
-    net.initialize(graphs)
-    calls = []
-    handle = net.encoders[0][0].register_forward_pre_hook(
-        lambda module, args: calls.append(True)
-    )
-    output = TRAWLReadout(16, 1, graph_dim=16, aggregation="deepset")(
-        net(batch), batch
-    )
-    loss = output["logits"].square().sum() + net.reconstruction_loss(batch)
-    loss.backward()
-    assert torch.isfinite(loss)
-    assert len(calls) == 2
-    handle.remove()
-
-
-def test_gated_autocast_gradient():
-    with (
-        torch.backends.mkldnn.flags(enabled=False),
-        torch.autocast("cpu", dtype=torch.bfloat16),
-    ):
-        test_extended_lifting("gated")
-
-
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA validation")
-def test_gated_cuda_autocast_gradient():
-    with torch.autocast("cuda", dtype=torch.bfloat16):
-        test_extended_lifting("gated", device="cuda")

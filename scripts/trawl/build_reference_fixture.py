@@ -1,4 +1,4 @@
-"""Regenerate small numerical fixtures from a trusted local TRAWL checkout.
+"""Regenerate the SISA reference fixture from a trusted local TRAWL checkout.
 
 Usage: python scripts/trawl/build_reference_fixture.py --source-root ../
 Only selected mathematical classes/functions are executed; original training
@@ -10,12 +10,10 @@ import ast
 import hashlib
 import json
 import math
-import os
 from pathlib import Path
 
 import numpy as np
 import torch
-import torch.utils.checkpoint as checkpoint
 from torch import nn
 from torch.nn import functional as F
 
@@ -40,59 +38,12 @@ def main():
         default=Path("test/nn/trawl/fixtures/reference.npz"),
     )
     args = parser.parse_args()
-    snapshot = (
-        args.source_root / "snapshots/proteins_peak224_l5_mean_7470_5seed"
-    )
-    pure = snapshot / "mutag_edvw_ccmamba.py"
-    model_source = snapshot / "trawl_proteins.py"
     sisa_source = (
         args.source_root
         / "snapshots/proteins_peak224_richfeat_hybrid_learnable_gate/trawl_proteins.py"
     )
-    namespace = {
-        "torch": torch,
-        "nn": nn,
-        "F": F,
-        "np": np,
-        "os": os,
-        "math": math,
-        "checkpoint": checkpoint,
-        "D_STATE": 4,
-        "D_CONV": 4,
-        "EXPAND": 2,
-        "PRETRAIN_MASK_RATIO": 0.15,
-    }
-    exec(definitions(pure, {"PureTorchMambaBlock"}), namespace)
-    namespace["build_mamba_block"] = lambda **kwargs: namespace[
-        "PureTorchMambaBlock"
-    ](**kwargs)
-    exec(
-        definitions(model_source, {"MambaBlock", "BiophysicalTRAWLMamba"}),
-        namespace,
-    )
-    torch.manual_seed(781)
-    reference = namespace["BiophysicalTRAWLMamba"](
-        4, 6, 1, 4, 16, 4, 2, dropout=0.0
-    ).eval()
-    signals, pe = torch.randn(2, 3, 7, 4), torch.randn(2, 3, 7, 6)
-    values = {"signals": signals.numpy(), "pe": pe.numpy()}
-    with torch.no_grad():
-        values["pooled"] = reference.encode_pooled(signals, pe).numpy()
-        values["targets"] = reference.reconstruction_targets(
-            signals, pe
-        ).numpy()
-    for key, tensor in reference.state_dict().items():
-        values["continuous::" + key] = tensor.numpy().copy()
-    reference.encode_pooled(signals, pe).square().mean().backward()
-    for key, parameter in reference.named_parameters():
-        if parameter.grad is not None:
-            values["continuous_grad::" + key] = parameter.grad.numpy().copy()
-    torch.optim.Adam(reference.parameters(), lr=1e-4, weight_decay=1e-3).step()
-    for key, parameter in reference.named_parameters():
-        if parameter.grad is not None:
-            values["continuous_step::" + key] = (
-                parameter.detach().numpy().copy()
-            )
+    namespace = {"torch": torch, "nn": nn, "F": F, "math": math}
+    values = {}
     exec(
         definitions(
             sisa_source,
@@ -123,11 +74,11 @@ def main():
             str(path.relative_to(args.source_root)).replace(
                 "\\", "/"
             ): hashlib.sha256(path.read_bytes()).hexdigest()
-            for path in [pure, model_source, sisa_source]
+            for path in [sisa_source]
         },
         "torch": torch.__version__,
-        "seed": [781, 782],
-        "scope": "Layer/continuous-encoder forward, gradient and Adam-step parity; not end-to-end run reproduction.",
+        "seed": [782],
+        "scope": "SISA block forward, gradient and Adam-step parity with the original implementation.",
     }
     args.output.with_suffix(".json").write_text(
         json.dumps(metadata, indent=2) + "\n"

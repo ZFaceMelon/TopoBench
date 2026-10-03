@@ -3,11 +3,5 @@ defaults:
   - /experiment/trawl/proteins_hybrid
   - override /dataset: graph/NCI1
 
-transforms:
-  historical:
-    rich_features: true
-model:
-  backbone:
-    pe_dim: 72
 trainer:
   accumulate_grad_batches: 16

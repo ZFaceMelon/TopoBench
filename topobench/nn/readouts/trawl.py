@@ -1,6 +1,5 @@
 """Task-independent TRAWL heads compatible with TBModel's loss pipeline."""
 
-import torch
 from torch import nn
 
 
@@ -22,11 +21,10 @@ class TRAWLReadout(nn.Module):
         Hidden width of an MLP head; a linear head is used if None
         (default: None).
     dropout : float, optional
-        Dropout probability inside the head and DeepSet networks
-        (default: 0.0).
+        Dropout probability inside the head (default: 0.0).
     aggregation : str, optional
-        Graph aggregation: ``"embedding"``, ``"walk_logits"`` or
-        ``"deepset"`` (default: "embedding").
+        Graph aggregation: ``"embedding"`` or ``"walk_logits"``
+        (default: "embedding").
     input_dropout : float, optional
         Dropout probability on head inputs; defaults to ``dropout`` if None
         (default: None).
@@ -46,26 +44,13 @@ class TRAWLReadout(nn.Module):
         super().__init__()
         if task_level not in {"node", "graph"}:
             raise ValueError("TRAWL supports TopoBench's node and graph tasks")
-        if aggregation not in {"embedding", "walk_logits", "deepset"}:
+        if aggregation not in {"embedding", "walk_logits"}:
             raise ValueError("Unknown readout aggregation")
         self.task_level, self.aggregation = task_level, aggregation
         width = (
             hidden_dim if task_level == "node" else (graph_dim or hidden_dim)
         )
         input_dropout = dropout if input_dropout is None else input_dropout
-        if aggregation == "deepset":
-            self.phi = nn.Sequential(
-                nn.Linear(width, width * 2),
-                nn.ReLU(),
-                nn.Dropout(dropout),
-                nn.Linear(width * 2, width),
-            )
-            self.rho = nn.Sequential(
-                nn.Linear(width, width * 2),
-                nn.ReLU(),
-                nn.Dropout(dropout),
-                nn.Linear(width * 2, width),
-            )
         if head_hidden:
             self.head = nn.Sequential(
                 nn.Dropout(input_dropout),
@@ -104,24 +89,6 @@ class TRAWLReadout(nn.Module):
                 raise ValueError(
                     "Use embedding aggregation with separate neighborhoods or cell readout to preserve their fusion"
                 )
-            if self.aggregation == "deepset":
-                if "walk_weights" in model_out:
-                    raise ValueError(
-                        "Branch gating requires embedding or walk_logits aggregation"
-                    )
-                walks = self.phi(model_out["walk_embedding"])
-                views = model_out.get("num_views", 1)
-                indices = model_out["walk_batch"] * views + model_out.get(
-                    "walk_view", torch.zeros_like(model_out["walk_batch"])
-                )
-                graph = walks.new_zeros(
-                    len(model_out["graph_embedding"]) * views, walks.shape[-1]
-                ).index_add(0, indices, walks)
-                predictions = self.head(self.rho(graph))
-                model_out["logits"] = predictions.reshape(
-                    -1, views, predictions.shape[-1]
-                ).mean(1)
-                return model_out
             if self.aggregation == "walk_logits" and len(
                 model_out["walk_batch"]
             ):
@@ -130,14 +97,6 @@ class TRAWLReadout(nn.Module):
                     len(model_out["graph_embedding"]),
                     predictions.shape[-1],
                 )
-                if "walk_weights" in model_out:
-                    weighted = predictions * model_out["walk_weights"][:, None]
-                    model_out["logits"] = weighted.new_zeros(shape).index_add(
-                        0,
-                        model_out["walk_batch"],
-                        weighted,
-                    )
-                    return model_out
                 sums = predictions.new_zeros(shape).index_add(
                     0, model_out["walk_batch"], predictions
                 )
@@ -147,15 +106,8 @@ class TRAWLReadout(nn.Module):
                     predictions.new_ones(len(predictions), 1),
                 )
                 logits = sums / count.clamp_min(1)
-                # Host walk counts, when supplied, avoid a device sync.
-                walk_counts = model_out.get("walk_counts")
-                has_missing = (
-                    any(c == 0 for c in walk_counts)
-                    if walk_counts is not None
-                    else None
-                )
                 missing = count.squeeze(-1) == 0
-                if has_missing or (has_missing is None and missing.any()):
+                if missing.any():
                     logits[missing] = self.head(
                         model_out["graph_embedding"][missing]
                     )

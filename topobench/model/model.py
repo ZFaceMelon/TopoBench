@@ -180,12 +180,6 @@ class TBModel(HostBatchTransferMixin, LightningModule):
         """
         # Allow batch object to know the phase of the training
         batch["model_state"] = self.state_str
-        if hasattr(self.backbone, "sampling_context"):
-            self.backbone.sampling_context.update(
-                epoch=self.current_epoch + 1,
-                rank=self.global_rank,
-                stage=self.state_str,
-            )
 
         # Forward pass
         if self.training or self.evaluation_autocast:
@@ -223,13 +217,6 @@ class TBModel(HostBatchTransferMixin, LightningModule):
             A tensor of losses between model predictions and targets.
         """
         self.state_str = "Training"
-        if hasattr(self.backbone, "sampling_context"):
-            accumulation = self.trainer.accumulate_grad_batches
-            self.backbone.sampling_context.update(
-                batch=batch_idx // accumulation,
-                microbatch=batch_idx % accumulation,
-                seed_offset=0,
-            )
         model_out = self.model_step(batch)
 
         # Update and log metrics. Logging the tensor (not ``item()``) avoids
@@ -246,14 +233,6 @@ class TBModel(HostBatchTransferMixin, LightningModule):
         )
 
         # Return loss for backpropagation step
-        if getattr(self.backbone, "sampling_protocol", None) == "historical":
-            from topobench.model.trawl_pretraining import (
-                historical_accumulation_weight,
-            )
-
-            return model_out["loss"] * historical_accumulation_weight(
-                self, batch, batch_idx
-            )
         return model_out["loss"]
 
     def validation_step(self, batch: Data, batch_idx: int) -> None:

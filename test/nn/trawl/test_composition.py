@@ -9,20 +9,12 @@ import torch
 from torch import nn
 
 from topobench.data.utils.trawl.sampling import WalkSampler
-from topobench.loss.model.trawl import AuxiliaryReconstructionLoss
 from topobench.model.trawl_pretraining import TRAWLPretrainer
-from topobench.nn.backbones.combinatorial.trawl import (
-    ContinuousTRAWL,
-)
 from topobench.nn.encoders.trawl import TRAWLFeatureEncoder
 from topobench.nn.readouts.trawl import TRAWLReadout
 from topobench.optimizer.schedulers import warmup_cosine
 from topobench.transforms.data_manipulations.trawl import TRAWLTransform
-from topobench.transforms.data_manipulations.trawl_historical import (
-    HistoricalCellTransform,
-)
 
-from .test_integration import TinyDataset
 from .test_trawl import collate, complex_data, model, prepare
 
 
@@ -30,7 +22,6 @@ def test_native_component_registration():
     """Native discovery and direct Hydra imports share the backbone classes."""
     from topobench.loss import TBLoss
     from topobench.loss.loss import TBLoss as DirectTBLoss
-    from topobench.loss.model import LOSSES
     from topobench.nn.backbones import MODEL_CLASSES
     from topobench.nn.backbones.combinatorial import BACKBONE_CLASSES
     from topobench.nn.backbones.combinatorial.trawl import TRAWL
@@ -43,30 +34,11 @@ def test_native_component_registration():
     assert TBLoss is DirectTBLoss
     assert TBLoss.__module__ == "topobench.loss.loss"
     assert BACKBONE_CLASSES["TRAWL"] is TRAWL
-    assert MODEL_CLASSES["ContinuousTRAWL"] is ContinuousTRAWL
     assert "NeighborhoodFusion" not in MODEL_CLASSES
     assert "PureTorchMambaBlock" not in MODEL_CLASSES
     assert FEATURE_ENCODERS["TRAWLFeatureEncoder"] is TRAWLFeatureEncoder
-    assert LOSSES["AuxiliaryReconstructionLoss"] is AuxiliaryReconstructionLoss
     assert "TRAWLReadout" in READOUT_CLASSES
     assert TRANSFORMS["TRAWLTransform"] is DATA_MANIPULATIONS["TRAWLTransform"]
-    assert "HistoricalCellTransform" in DATA_MANIPULATIONS
-
-
-def test_deepset_averages_predictions_per_view():
-    head = TRAWLReadout(4, 1, aggregation="deepset").eval()
-    walks = torch.randn(6, 4)
-    output = {
-        "graph_embedding": torch.zeros(1, 4),
-        "walk_embedding": walks,
-        "walk_batch": torch.zeros(6, dtype=torch.long),
-        "walk_view": torch.tensor([0, 0, 0, 1, 1, 1]),
-        "num_views": 2,
-    }
-    expected = torch.stack(
-        [head.head(head.rho(head.phi(view).sum(0))) for view in walks.chunk(2)]
-    ).mean(0)
-    torch.testing.assert_close(head(output, None)["logits"][0], expected)
 
 
 def test_separate_readout_does_not_silently_discard_fusion():
@@ -128,33 +100,6 @@ def test_pretraining_updates_native_feature_encoder():
     trainer.log = lambda *args, **kwargs: None
     trainer._step(collate([data])).backward()
     assert encoder.encoder.projections[0].weight.grad is not None
-
-
-def test_auxiliary_reconstruction_decays_and_disables_in_eval():
-    graphs = [
-        HistoricalCellTransform(split_seeds=False, rwse_samples=2)(
-            TinyDataset()[0]
-        )
-    ]
-    net = ContinuousTRAWL(
-        hidden_dim=16,
-        depth=1,
-        architecture="mlp",
-        max_rank=1,
-        num_neighborhoods=1,
-        walks={"k": 3, "length": 5},
-        loss={"weight": 0.05, "decay_epochs": 20},
-    )
-    batch = collate(graphs)
-    output = net(batch)
-    output["logits"] = output["graph_embedding"]
-    loss = AuxiliaryReconstructionLoss()(output, batch)
-    torch.testing.assert_close(loss, output["reconstruction_loss"] * 0.05)
-    loss.backward()
-    assert net.reconstruction_decoder[-1].weight.grad is not None
-    output["epoch"] = 21
-    assert AuxiliaryReconstructionLoss()(output, batch) == 0
-    assert "reconstruction_loss" not in net.eval()(batch)
 
 
 def test_warmup_cosine_resume_matches_uninterrupted_schedule():
