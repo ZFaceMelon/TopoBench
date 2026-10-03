@@ -1,11 +1,11 @@
 _target_: topobench.model.TBModel
 model_name: trawl
-model_domain: general
+model_domain: combinatorial
 compile: false
 compile_scope: layers
 feature_encoder: null
 backbone:
-  _target_: topobench.nn.backbones.general.trawl.TRAWL
+  _target_: topobench.nn.backbones.combinatorial.trawl.TRAWL
   _recursive_: false
   hidden_dim: 128
   max_rank: 2

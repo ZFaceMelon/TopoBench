@@ -1,10 +1,10 @@
 defaults:
-  - /model/general/trawl@_here_
+  - /model/combinatorial/trawl@_here_
   - _self_
 
 backbone:
   loss: null
-  _target_: topobench.nn.backbones.general.trawl_continuous.ContinuousTRAWL
+  _target_: topobench.nn.backbones.combinatorial.trawl.ContinuousTRAWL
   _recursive_: false
   max_rank: 1
   num_neighborhoods: 1

@@ -13,10 +13,10 @@ from topobench.data.utils.trawl.encodings import (
     positional_encodings,
 )
 from topobench.data.utils.trawl.sampling import sample_walks
-from topobench.nn.backbones.general.trawl import TRAWL
-from topobench.nn.backbones.general.trawl_blocks import make_layer
-from topobench.nn.backbones.general.trawl_categorical import CategoricalTRAWL
-from topobench.nn.backbones.general.trawl_continuous import ContinuousTRAWL
+from topobench.nn.backbones.combinatorial.trawl import TRAWL
+from topobench.nn.backbones.combinatorial.trawl import make_layer
+from topobench.nn.backbones.combinatorial.trawl import CategoricalTRAWL
+from topobench.nn.backbones.combinatorial.trawl import ContinuousTRAWL
 from topobench.transforms.data_manipulations.trawl_historical import (
     HistoricalCellTransform,
 )

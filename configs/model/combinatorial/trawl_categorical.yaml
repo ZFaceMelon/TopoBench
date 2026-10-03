@@ -1,8 +1,8 @@
 defaults:
-  - /model/general/trawl_continuous@_here_
+  - /model/combinatorial/trawl_continuous@_here_
   - _self_
 backbone:
-  _target_: topobench.nn.backbones.general.trawl_categorical.CategoricalTRAWL
+  _target_: topobench.nn.backbones.combinatorial.trawl.CategoricalTRAWL
   architecture: mamba
   hidden_dim: 128
   depth: 4

@@ -11,12 +11,11 @@ sweeps. No backbone selects behavior by dataset name.
 TRAWL follows the existing component directories rather than defining a separate
 neural-network framework namespace:
 
-- `nn/backbones/general/trawl.py`: the base backbone. The sibling
-  `trawl_continuous.py`, `trawl_categorical.py` and `trawl_blocks.py` contain its
-  input variants and neural blocks. The `general` category is for architectures
-  that are independent of the input topology domain. This placement is proposed
-  for discussion with the project maintainers; it does not classify TRAWL as a
-  combinatorial-complex-only model.
+- `nn/backbones/combinatorial/trawl.py`: the complete backbone in one module:
+  sequence layers (Mamba, SISA and the others), the base `TRAWL` backbone and
+  its two historical input profiles, `ContinuousTRAWL` and `CategoricalTRAWL`.
+  TRAWL consumes cells of every rank and their incidences, so it is grouped with
+  the combinatorial backbones.
 - `nn/encoders/trawl.py` and `nn/readouts/trawl.py`: feature adapter and task head.
 - `transforms/data_manipulations/trawl.py` and `trawl_historical.py`: native
   preprocessing and the opt-in historical preprocessing profile. The latter
@@ -28,18 +27,17 @@ neural-network framework namespace:
   `evaluator/checkpoint.py`, and `utils/trawl_provenance.py`: auxiliary objective,
   optional training stage, schedule, checkpoint evaluation and run provenance.
 
-The base/variant model configs live under `configs/model/general`; the
-graph-only specialization lives under `configs/model/graph`. Experiments remain
-under `configs/experiment/trawl`. The earlier draft's `model=cell/trawl` and
-`model=combinatorial/trawl` commands are now `model=general/trawl`. There is no
-`topobench.nn.trawl` package.
+The base and variant model configs live under `configs/model/combinatorial`
+(`trawl`, `trawl_continuous`, `trawl_categorical`); the graph-only
+specialization lives under `configs/model/graph`. Experiments remain under
+`configs/experiment/trawl`.
 Integration tests remain grouped in `test/nn/trawl` because they exercise the
 complete model pipeline across these component boundaries.
 
 TRAWL is the complete TopoBench backbone. Mamba, SISA and the other sequence
-layers are configurable components inside it. General placement does not make
-every existing graph or cell backbone a drop-in sequence layer: custom modules
-must satisfy the sequence interface or use an appropriate adapter.
+layers are configurable components inside it. Existing graph or cell backbones
+are not drop-in sequence layers: custom modules must satisfy the sequence
+interface or use an appropriate adapter.
 
 ## Start here
 
@@ -55,12 +53,12 @@ release's generation imports. Set
 option controls only the pure-PyTorch backend and is ignored by official Mamba.
 
 ```bash
-python -m topobench model=general/trawl dataset=graph/PROTEINS logger=csv
-python -m topobench model=general/trawl dataset=graph/NCI1 model.backbone.architecture=sisa logger=csv
+python -m topobench model=combinatorial/trawl dataset=graph/PROTEINS logger=csv
+python -m topobench model=combinatorial/trawl dataset=graph/NCI1 model.backbone.architecture=sisa logger=csv
 python -m topobench model=graph/trawl dataset=graph/cocitation_cora logger=csv
 ```
 
-`general/trawl` defaults to a cycle lifting followed by TRAWL preprocessing for
+`combinatorial/trawl` defaults to a cycle lifting followed by TRAWL preprocessing for
 graph inputs. Already-lifted/native topological datasets use `trawl_existing`.
 `graph/trawl` uses the original graph edges without introducing higher cells.
 For another lifting, create a transform composition with that lifting first and
@@ -211,7 +209,7 @@ with topology reconstruction must not reintroduce held-out connectivity.
 ## Optional pretraining
 
 ```bash
-python -m topobench model=general/trawl dataset=graph/PROTEINS pretraining.enabled=true logger=csv
+python -m topobench model=combinatorial/trawl dataset=graph/PROTEINS pretraining.enabled=true logger=csv
 ```
 
 The base objectives are masked cell-feature reconstruction, optional color
@@ -400,9 +398,9 @@ Plateau schedulers step only on epochs that validate
 (`trainer.check_val_every_n_epoch`).
 
 ```bash
-python -m topobench -m model=general/trawl dataset=graph/PROTEINS model.backbone.architecture=mamba,sisa,hybrid model.backbone.walks.k=16,32 seed=40,41,42 logger=csv
+python -m topobench -m model=combinatorial/trawl dataset=graph/PROTEINS model.backbone.architecture=mamba,sisa,hybrid model.backbone.walks.k=16,32 seed=40,41,42 logger=csv
 python -m topobench -m experiment=trawl/proteins_hybrid seed=40,41,42,43,44 logger=csv
-python -m topobench model=general/trawl model.backbone.walk_scope=separate model.backbone.fusion=attention dataset=graph/PROTEINS logger=csv
+python -m topobench model=combinatorial/trawl model.backbone.walk_scope=separate model.backbone.fusion=attention dataset=graph/PROTEINS logger=csv
 ```
 
 Every TRAWL run writes `trawl_manifest.json` beside its output: resolved config,
@@ -424,7 +422,7 @@ the current best path, monitor and mode before restoration.
 
 ```bash
 python -m pytest test/nn/trawl -q
-python -m ruff check topobench/nn/backbones/general topobench/nn/encoders/trawl.py topobench/nn/readouts/trawl.py topobench/data/utils/trawl
+python -m ruff check topobench/nn/backbones/combinatorial/trawl.py topobench/nn/encoders/trawl.py topobench/nn/readouts/trawl.py topobench/data/utils/trawl
 ```
 
 The post-reorganization targeted check passed 177 tests across `test/nn/trawl`,

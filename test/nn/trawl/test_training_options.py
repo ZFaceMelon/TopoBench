@@ -15,7 +15,7 @@ from topobench.evaluator.checkpoint import (
     PredictionEnsemble,
     average_checkpoints,
 )
-from topobench.nn.backbones.general.trawl_blocks import WalkGraphLayer
+from topobench.nn.backbones.combinatorial.trawl import WalkGraphLayer
 from topobench.nn.readouts.trawl import TRAWLReadout
 
 from .test_trawl import collate, model, prepare

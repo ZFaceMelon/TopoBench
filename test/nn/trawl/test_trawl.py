@@ -18,8 +18,8 @@ from topobench.dataloader.utils import collate_fn
 from topobench.evaluator import TBEvaluator
 from topobench.loss.dataset.DatasetLoss import DatasetLoss
 from topobench.model.trawl_pretraining import TRAWLPretrainer
-from topobench.nn.backbones.general.trawl import TRAWL
-from topobench.nn.backbones.general.trawl_blocks import (
+from topobench.nn.backbones.combinatorial.trawl import TRAWL
+from topobench.nn.backbones.combinatorial.trawl import (
     PureTorchMambaBlock,
 )
 from topobench.nn.readouts.trawl import TRAWLReadout
@@ -282,7 +282,7 @@ def test_hydra_composition():
         cfg = compose(
             config_name="run",
             overrides=[
-                "model=general/trawl",
+                "model=combinatorial/trawl",
                 "dataset=graph/PROTEINS",
                 "logger=[]",
             ],

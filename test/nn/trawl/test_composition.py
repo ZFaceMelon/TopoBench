@@ -11,7 +11,7 @@ from torch import nn
 from topobench.data.utils.trawl.sampling import WalkSampler
 from topobench.loss.model.trawl import AuxiliaryReconstructionLoss
 from topobench.model.trawl_pretraining import TRAWLPretrainer
-from topobench.nn.backbones.general.trawl_continuous import (
+from topobench.nn.backbones.combinatorial.trawl import (
     ContinuousTRAWL,
 )
 from topobench.nn.encoders.trawl import TRAWLFeatureEncoder
@@ -32,8 +32,8 @@ def test_native_component_registration():
     from topobench.loss.loss import TBLoss as DirectTBLoss
     from topobench.loss.model import LOSSES
     from topobench.nn.backbones import MODEL_CLASSES
-    from topobench.nn.backbones.general import BACKBONE_CLASSES
-    from topobench.nn.backbones.general.trawl import TRAWL
+    from topobench.nn.backbones.combinatorial import BACKBONE_CLASSES
+    from topobench.nn.backbones.combinatorial.trawl import TRAWL
     from topobench.nn.encoders import FEATURE_ENCODERS
     from topobench.nn.readouts import READOUT_CLASSES
     from topobench.transforms import TRANSFORMS

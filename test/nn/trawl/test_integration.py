@@ -15,7 +15,7 @@ from topobench.model.trawl_pretraining import (
     ContinuousPretrainer,
     run_pretraining,
 )
-from topobench.nn.backbones.general.trawl_continuous import (
+from topobench.nn.backbones.combinatorial.trawl import (
     ContinuousTRAWL,
 )
 from topobench.run import run
@@ -151,7 +151,7 @@ def test_native_runner(
         cfg = compose(
             config_name="run",
             overrides=[
-                "model=general/trawl"
+                "model=combinatorial/trawl"
                 if profile == "base"
                 else "experiment=trawl/proteins_mamba",
                 "dataset=graph/PROTEINS",
@@ -232,7 +232,7 @@ def test_native_runner(
             (tmp_path / "output/trawl_manifest.json").read_text()
         )
         assert (
-            "nn/backbones/general/trawl.py"
+            "nn/backbones/combinatorial/trawl.py"
             in manifest["implementation_sha256"]
         )
         assert (
@@ -325,7 +325,7 @@ def test_extended_lifting(lifting, device="cpu"):
 
 
 def test_categorical_forward_and_pretraining():
-    from topobench.nn.backbones.general.trawl_categorical import (
+    from topobench.nn.backbones.combinatorial.trawl import (
         CategoricalTRAWL,
     )
     from topobench.nn.readouts.trawl import TRAWLReadout

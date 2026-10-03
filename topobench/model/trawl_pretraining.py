@@ -591,13 +591,13 @@ def run_pretraining(
         ``pretraining`` subdirectory, otherwise to a temporary directory
         (default: None).
     """
-    from topobench.nn.backbones.general.trawl import TRAWL
+    from topobench.nn.backbones.combinatorial.trawl import TRAWL
 
     if not isinstance(model.backbone, TRAWL):
         raise ValueError(
             "The TRAWL pretraining config requires a TRAWL backbone"
         )
-    from topobench.nn.backbones.general.trawl_continuous import (
+    from topobench.nn.backbones.combinatorial.trawl import (
         ContinuousTRAWL,
     )
     from topobench.nn.encoders.trawl import TRAWLFeatureEncoder

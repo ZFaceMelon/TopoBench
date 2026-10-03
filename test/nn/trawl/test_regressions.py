@@ -21,8 +21,8 @@ from topobench.model.trawl_pretraining import (
     PretrainingCheckpoint,
     validation_frequency,
 )
-from topobench.nn.backbones.general.trawl_blocks import SISALayer
-from topobench.nn.backbones.general.trawl_continuous import ContinuousTRAWL
+from topobench.nn.backbones.combinatorial.trawl import SISALayer
+from topobench.nn.backbones.combinatorial.trawl import ContinuousTRAWL
 from topobench.nn.readouts.trawl import TRAWLReadout
 from topobench.optimizer import TBOptimizer
 from topobench.run import enable_unused_parameter_detection
@@ -438,7 +438,7 @@ def test_deterministic_flag_survives_trainer_construction():
 
 
 def test_sequence_cumsum_matches_cumsum():
-    from topobench.nn.backbones.general.trawl_blocks import sequence_cumsum
+    from topobench.nn.backbones.combinatorial.trawl import sequence_cumsum
 
     x = torch.randn(2, 4, 32, 3)
     torch.testing.assert_close(sequence_cumsum(x, 2), torch.cumsum(x, 2))

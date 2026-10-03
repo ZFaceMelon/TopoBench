@@ -1,6 +1,6 @@
 # @package _global_
 defaults:
-  - override /model: general/trawl
+  - override /model: combinatorial/trawl
 model:
   backbone:
     num_neighborhoods: 6

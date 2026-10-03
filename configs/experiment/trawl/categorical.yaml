@@ -1,7 +1,7 @@
 # @package _global_
 # Reusable categorical/DeepSet profile. No historical ZINC score is claimed.
 defaults:
-  - override /model: general/trawl_categorical
+  - override /model: combinatorial/trawl_categorical
   - override /transforms: trawl_historical
 transforms:
   historical:

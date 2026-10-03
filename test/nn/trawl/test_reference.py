@@ -5,8 +5,8 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from topobench.nn.backbones.general.trawl_blocks import SISABlock
-from topobench.nn.backbones.general.trawl_continuous import (
+from topobench.nn.backbones.combinatorial.trawl import SISABlock
+from topobench.nn.backbones.combinatorial.trawl import (
     ContinuousTRAWL,
 )
 
