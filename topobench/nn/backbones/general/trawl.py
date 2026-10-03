@@ -18,6 +18,18 @@ def upload(array, device):
 
     Integer arrays become int64 on every platform. CUDA copies go through
     pinned memory with ``non_blocking`` so they never synchronize.
+
+    Parameters
+    ----------
+    array : array_like
+        Host array to copy.
+    device : torch.device or str
+        Target device.
+
+    Returns
+    -------
+    torch.Tensor
+        Tensor on ``device``; integer and boolean arrays become int64.
     """
     array = np.ascontiguousarray(array)
     if array.dtype.kind in "iub":
@@ -29,7 +41,18 @@ def upload(array, device):
 
 
 class NeighborhoodFusion(nn.Module):
-    """Fuse available neighborhood embeddings, preserving empty-slot semantics."""
+    """Fuse available neighborhood embeddings, preserving empty-slot semantics.
+
+    Parameters
+    ----------
+    dim : int
+        Dimension of each neighborhood embedding.
+    count : int
+        Number of neighborhoods.
+    mode : str, optional
+        Fusion mode: ``"mean"``, ``"concat"``, ``"learned"`` or
+        ``"attention"`` (default: "mean").
+    """
 
     def __init__(self, dim, count, mode="mean"):
         super().__init__()
@@ -45,6 +68,22 @@ class NeighborhoodFusion(nn.Module):
         )
 
     def forward(self, values, available, fallback):
+        """Fuse neighborhood embeddings, ignoring unavailable slots.
+
+        Parameters
+        ----------
+        values : torch.Tensor
+            Neighborhood embeddings of shape ``[count, dim]``.
+        available : torch.Tensor
+            Boolean mask of shape ``[count]`` marking neighborhoods with walks.
+        fallback : torch.Tensor
+            Embedding of shape ``[dim]`` returned when none is available.
+
+        Returns
+        -------
+        torch.Tensor
+            Fused embedding of shape ``[dim]``.
+        """
         if not bool(available.any()):
             return fallback
         if self.mode == "concat":
@@ -71,6 +110,72 @@ class TRAWL(nn.Module):
     ``TRAWLReadout``. No dataset names or task-specific branches occur here.
     Call ``initialize`` before constructing optimizers when input widths are
     inferred (the standard runner does this automatically).
+
+    Parameters
+    ----------
+    hidden_dim : int, optional
+        Hidden dimension of walk states (default: 128).
+    max_rank : int, optional
+        Maximum cell rank (default: 2).
+    in_channels : list of int, optional
+        Input feature width per rank. If None, widths are inferred lazily
+        (default: None).
+    pe_dim : int, optional
+        Positional encoding width. If None, it is inferred lazily
+        (default: None).
+    layers : list, optional
+        Explicit sequence layer configs passed to ``make_layer``. If None,
+        layers are built from ``architecture`` and ``depth`` (default: None).
+    architecture : str, optional
+        Preset architecture: ``"mamba"``, ``"sisa"``, ``"hybrid"`` (alternating
+        Mamba and SISA), ``"gru"``, ``"transformer"`` or ``"mlp"``
+        (default: "hybrid").
+    depth : int, optional
+        Number of preset sequence layers (default: 5).
+    layer_options : dict, optional
+        Per-kind options for preset layers (default: None).
+    walks : dict, optional
+        Walk sampler settings (default: ``{"k": 32, "length": 32}``).
+    walk_scope : str, optional
+        ``"union"`` walks over all neighborhoods jointly, ``"separate"`` per
+        neighborhood (default: "union").
+    num_neighborhoods : int, optional
+        Number of neighborhood relations produced by the transform
+        (default: 2).
+    encoder_sharing : str, optional
+        ``"shared"`` or ``"independent"`` encoders for separate neighborhoods
+        (default: "shared").
+    fusion : str, optional
+        Neighborhood fusion mode for separate walks (default: "mean").
+    pooling : str, optional
+        Temporal pooling: ``"mean"``, ``"max"`` or ``"mean_max"``
+        (default: "mean_max").
+    rank_embedding : bool, optional
+        Whether to add a learned rank embedding (default: True).
+    num_colors : int, optional
+        Number of color embeddings; 0 disables them (default: 0).
+    move_embedding : bool, optional
+        Whether to embed rank moves (down, same, up) along walks
+        (default: True).
+    dropout : float, optional
+        Dropout probability on walk inputs (default: 0.0).
+    seed : int, optional
+        Base seed for walk sampling (default: 42).
+    eval_views : int, optional
+        Number of walk views sampled at evaluation (default: 1).
+    checkpoint_layers : bool, optional
+        Whether to use activation checkpointing during training
+        (default: False).
+    walk_refresh : str, optional
+        ``"train"`` resamples walks every training step, ``"fixed"`` keeps
+        them fixed (default: "train").
+    occurrence_pooling : str, optional
+        Pooling of a cell's walk occurrences: ``"mean"`` or ``"attention"``
+        (default: "mean").
+    graph_readout : str, optional
+        Graph embedding source: ``"walks"`` or ``"cells"`` (default: "walks").
+    transition_cache_size : int, optional
+        Cache size of the walk sampler (default: 1024).
     """
 
     def __init__(
@@ -206,7 +311,13 @@ class TRAWL(nn.Module):
         )
 
     def initialize(self, data_list):
-        """Materialize projections from training data, including absent ranks."""
+        """Materialize projections from training data, including absent ranks.
+
+        Parameters
+        ----------
+        data_list : list of torch_geometric.data.Data
+            Transformed training graphs used to infer input widths.
+        """
         if not data_list:
             raise ValueError(
                 "Cannot infer TRAWL input widths from an empty dataset"
@@ -247,7 +358,18 @@ class TRAWL(nn.Module):
     )
 
     def _host(self, batch):
-        """CPU copies of ``host_fields``, without waiting for the device."""
+        """Return CPU copies of ``host_fields`` without waiting for the device.
+
+        Parameters
+        ----------
+        batch : torch_geometric.data.Batch
+            Batch, optionally carrying precomputed ``trawl_host`` arrays.
+
+        Returns
+        -------
+        dict
+            Mapping from field name to NumPy array.
+        """
         host = getattr(batch, "trawl_host", None)
         if host is None:
             host = {
@@ -258,7 +380,13 @@ class TRAWL(nn.Module):
         return host
 
     def next_sampling_step(self):
-        """Return the training sampling step and advance it."""
+        """Return the training sampling step and advance it.
+
+        Returns
+        -------
+        int
+            Sampling step before the increment.
+        """
         if self._host_sampling_step is None:
             self._host_sampling_step = int(self.sampling_step)
         step = self._host_sampling_step
@@ -272,11 +400,32 @@ class TRAWL(nn.Module):
         self._host_sampling_step = 0
 
     def _load_from_state_dict(self, *args, **kwargs):
+        """Load state and invalidate the host sampling-step mirror.
+
+        Parameters
+        ----------
+        *args : tuple
+            Positional arguments forwarded to ``nn.Module``.
+        **kwargs : dict
+            Keyword arguments forwarded to ``nn.Module``.
+        """
         # A restored buffer invalidates the host mirror.
         self._host_sampling_step = None
         super()._load_from_state_dict(*args, **kwargs)
 
     def _pool(self, x):
+        """Pool walk states over time.
+
+        Parameters
+        ----------
+        x : torch.Tensor
+            States of shape ``[walk, time, hidden]``.
+
+        Returns
+        -------
+        torch.Tensor
+            Pooled embeddings of shape ``[walk, output_dim]``.
+        """
         if self.pooling == "mean":
             return x.mean(dim=1)
         if self.pooling == "max":
@@ -285,6 +434,24 @@ class TRAWL(nn.Module):
         return torch.cat((x.amax(dim=1), x.mean(dim=1)), dim=-1)
 
     def _encode(self, x, paths, ranks, relation):
+        """Encode sampled walks with the sequence layers.
+
+        Parameters
+        ----------
+        x : torch.Tensor
+            Cell states of shape ``[cells, hidden]``.
+        paths : torch.Tensor
+            Walk cell indices of shape ``[walk, time]``.
+        ranks : torch.Tensor
+            Rank of each cell, shape ``[cells]``.
+        relation : int
+            Neighborhood group index selecting the encoder.
+
+        Returns
+        -------
+        torch.Tensor
+            Encoded walk states of shape ``[walk, time, hidden]``.
+        """
         tokens = x[paths]
         if self.move is not None:
             path_ranks = ranks[paths]
@@ -305,6 +472,20 @@ class TRAWL(nn.Module):
         return self.output_norm(tokens)
 
     def forward(self, batch):
+        """Sample and encode walks for every graph in the batch.
+
+        Parameters
+        ----------
+        batch : torch_geometric.data.Batch
+            Batch produced by ``TRAWLTransform``.
+
+        Returns
+        -------
+        dict
+            Contextual cell features ``x_r`` and ``batch_r``, cell, walk and
+            graph embeddings with their batch indices, labels and readout
+            metadata.
+        """
         host = self._host(batch)
         counts = host["trawl_counts"].reshape(-1, self.max_rank + 1)
         edge_slices = getattr(batch, "_slice_dict", {}).get("trawl_edges")

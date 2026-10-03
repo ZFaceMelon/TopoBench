@@ -12,7 +12,18 @@ from omegaconf import OmegaConf
 
 
 def tensor_digest(tensors):
-    """Hash ordered named tensors, including shape and dtype metadata."""
+    """Hash ordered named tensors, including shape and dtype metadata.
+
+    Parameters
+    ----------
+    tensors : iterable of tuple
+        ``(name, value)`` pairs; values that are not tensors are skipped.
+
+    Returns
+    -------
+    str
+        Hexadecimal SHA-256 digest.
+    """
     digest = hashlib.sha256()
     for name, value in tensors:
         if not isinstance(value, torch.Tensor):
@@ -30,7 +41,22 @@ def tensor_digest(tensors):
 
 
 def write_run_manifest(config, model, datamodule):
-    """Save resolved configuration, input-order hashes and numerical environment."""
+    """Save resolved configuration, input-order hashes and numerical environment.
+
+    Parameters
+    ----------
+    config : DictConfig
+        Run configuration; the manifest is written to ``paths.output_dir``.
+    model : torch.nn.Module
+        Model whose initial ``state_dict`` is hashed.
+    datamodule : TBDataloader
+        Data module whose train, validation and test datasets are hashed.
+
+    Returns
+    -------
+    pathlib.Path
+        Path of the written ``trawl_manifest.json``.
+    """
     splits = {}
     for name in ("train", "val", "test"):
         dataset = getattr(datamodule, f"dataset_{name}")

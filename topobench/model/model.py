@@ -18,6 +18,20 @@ class HostBatchTransferMixin:
     """
 
     def on_before_batch_transfer(self, batch, dataloader_idx):
+        """Attach host copies of the backbone's ``host_fields`` to the batch.
+
+        Parameters
+        ----------
+        batch : Any
+            The batch, still on the host.
+        dataloader_idx : int
+            Index of the dataloader that produced the batch.
+
+        Returns
+        -------
+        Any
+            The batch, with ``trawl_host`` set for ``Data`` batches.
+        """
         backbone = getattr(self, "backbone", None)
         fields = getattr(backbone, "host_fields", ())
         if fields and isinstance(batch, Data):
@@ -27,6 +41,22 @@ class HostBatchTransferMixin:
         return batch
 
     def transfer_batch_to_device(self, batch, device, dataloader_idx):
+        """Copy the batch to the device, using ``non_blocking`` for ``Data``.
+
+        Parameters
+        ----------
+        batch : Any
+            The batch to transfer.
+        device : torch.device
+            Target device.
+        dataloader_idx : int
+            Index of the dataloader that produced the batch.
+
+        Returns
+        -------
+        Any
+            The batch on ``device``.
+        """
         if isinstance(batch, Data):
             return batch.to(device, non_blocking=True)
         return super().transfer_batch_to_device(batch, device, dataloader_idx)

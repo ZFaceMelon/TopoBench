@@ -365,6 +365,11 @@ def rerun_best_model_checkpoint(
         A list of callbacks to search for the `ModelCheckpoint`.
     logger : list[Logger]
         A list of loggers (e.g., WandbLogger) to record the re-run metrics.
+
+    Returns
+    -------
+    dict
+        Re-run metrics with `val_best_rerun/` and `test_best_rerun/` prefixes.
     """
     final_metrics = {}
     selected_checkpoints = []

@@ -18,6 +18,41 @@ class HistoricalCellTransform(BaseTransform):
     This is an opt-in compatibility lifting, never the base TRAWL default.
     Split-dependent RWSE seeds are applied after the dataset is partitioned.
     Source node features/edges are retained so the split hook can rebuild PSE.
+
+    Parameters
+    ----------
+    lift : bool, optional
+        If True, lift bonds to higher cells such as rings; otherwise only
+        bonds are states (default: True).
+    seed : int, optional
+        Base seed for the empirical RWSE (default: 42).
+    rwse_samples : int, optional
+        Number of sampled walks for the empirical RWSE (default: 8).
+    rw_steps : int, optional
+        Number of RWSE steps (default: 8).
+    rich_features : bool, optional
+        If True, append rich molecular structural encodings (default: False).
+    attr_dim : int, optional
+        Atom attribute dimension passed to the feature helpers (default: 0).
+    split_seeds : bool, optional
+        If True, defer building to ``prepare_split`` with split-dependent
+        seeds; otherwise build in ``forward`` (default: True).
+    guidance : dict, optional
+        Keyword arguments for ``laplacian_guided_neigh_probs`` (default:
+        None, meaning ``{"gamma": 0.2, "diffusion_t": 0.1}``).
+    spectral : dict, optional
+        Keyword arguments for ``hasse_spectral_pse`` (default: None).
+    profile : str, optional
+        Feature implementation, ``"classic"`` or ``"extended"``
+        (default: "classic").
+    lifting : str, optional
+        Cell lifting: ``"champion"``, ``"star"``, ``"short_cycles"`` or
+        ``"multiscale"``, or with the extended profile also
+        ``"cycle18_adj3"``, ``"merged"`` or ``"gated"`` (default: "champion").
+    cycle_mix : float, optional
+        Cycle mixing weight for the ``"merged"`` lifting (default: 0.35).
+    **kwargs : dict
+        Ignored extra options.
     """
 
     def __init__(
@@ -55,6 +90,19 @@ class HistoricalCellTransform(BaseTransform):
         )
 
     def forward(self, data):
+        """Build features now, or defer them to ``prepare_split``.
+
+        Parameters
+        ----------
+        data : torch_geometric.data.Data
+            Molecular graph.
+
+        Returns
+        -------
+        torch_geometric.data.Data
+            The unchanged input when ``split_seeds`` is set, otherwise the
+            built graph.
+        """
         return data if self.split_seeds else self.build(data, self.seed)
 
     def prepare_split(self, dataset, split_offset, cache_dir=None):
@@ -63,6 +111,17 @@ class HistoricalCellTransform(BaseTransform):
         The cache key covers the transform settings, the split, every input
         graph's tensors, the feature implementation and numerical library
         versions, so a cached split is the identical result of rebuilding.
+
+        Parameters
+        ----------
+        dataset : Any
+            Split dataset whose ``data_lst`` is replaced in place; ignored
+            when None.
+        split_offset : int
+            Offset added to ``seed`` for this split.
+        cache_dir : str or pathlib.Path, optional
+            Directory for cached splits; caching is disabled when None
+            (default: None).
         """
         if not self.split_seeds or dataset is None:
             return
@@ -86,6 +145,22 @@ class HistoricalCellTransform(BaseTransform):
             temporary.replace(path)
 
     def _split_cache_path(self, data_list, split_offset, cache_dir):
+        """Return the cache file path for a split, keyed by its content hash.
+
+        Parameters
+        ----------
+        data_list : list of torch_geometric.data.Data
+            Input graphs of the split.
+        split_offset : int
+            Offset added to ``seed`` for this split.
+        cache_dir : str or pathlib.Path
+            Root cache directory.
+
+        Returns
+        -------
+        pathlib.Path
+            Path of the cached split file.
+        """
         import networkx
         import scipy
 
@@ -134,6 +209,22 @@ class HistoricalCellTransform(BaseTransform):
         )
 
     def build(self, data, seed, identity=0):
+        """Build the historical cell states, signals and encodings for a graph.
+
+        Parameters
+        ----------
+        data : torch_geometric.data.Data
+            Molecular graph; it is cloned, not modified.
+        seed : int
+            Seed for the empirical RWSE.
+        identity : int, optional
+            Value stored in ``trawl_identity`` (default: 0).
+
+        Returns
+        -------
+        torch_geometric.data.Data
+            Copy of the input with ``trawl_*`` fields added.
+        """
         features = legacy_features
         if self.profile == "extended":
             from topobench.data.utils.trawl import (

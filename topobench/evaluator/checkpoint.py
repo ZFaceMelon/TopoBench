@@ -11,6 +11,17 @@ def average_checkpoints(paths):
 
     Paths must be ordered best-first by the validation checkpoint callback.
     Keys, dtypes and shapes must agree. This never averages optimizer states.
+
+    Parameters
+    ----------
+    paths : list of str or pathlib.Path
+        Lightning checkpoint files, ordered best-first.
+
+    Returns
+    -------
+    dict
+        Averaged model ``state_dict``; non-floating tensors are taken from
+        the first (best) checkpoint.
     """
     if not paths:
         raise ValueError("No checkpoints available to average")
@@ -39,7 +50,16 @@ def average_checkpoints(paths):
 
 
 class PredictionEnsemble(nn.Module):
-    """Run complete model pipelines and average logits before loss/metrics."""
+    """Run complete model pipelines and average logits before loss/metrics.
+
+    Parameters
+    ----------
+    model : TBModel
+        Model whose feature encoder, backbone and readout are copied for
+        each ensemble member.
+    paths : list of str or pathlib.Path
+        Lightning checkpoint files, one per ensemble member.
+    """
 
     def __init__(self, model, paths):
         super().__init__()
@@ -73,6 +93,19 @@ class PredictionEnsemble(nn.Module):
         self.members = nn.ModuleList(members)
 
     def forward(self, batch):
+        """Run every member pipeline and average their logits.
+
+        Parameters
+        ----------
+        batch : torch_geometric.data.Data
+            Input batch; each member receives its own clone.
+
+        Returns
+        -------
+        dict
+            Output of the last member with ``logits`` replaced by the mean
+            logits across members.
+        """
         predictions = []
         for pipeline in self.members:
             member_batch = batch.clone()
@@ -89,11 +122,31 @@ class PredictionEnsemble(nn.Module):
 
 
 class PassThroughReadout(nn.Module):
-    """Keep the TBModel task interface when logits were produced by an ensemble."""
+    """Keep the TBModel task interface when logits were produced by an ensemble.
+
+    Parameters
+    ----------
+    task_level : str
+        Task level exposed to ``TBModel`` (e.g. ``"graph"`` or ``"node"``).
+    """
 
     def __init__(self, task_level):
         super().__init__()
         self.task_level = task_level
 
     def forward(self, model_out, batch):
+        """Return the model output unchanged.
+
+        Parameters
+        ----------
+        model_out : dict
+            Output of the ensemble, already containing ``logits``.
+        batch : torch_geometric.data.Data
+            Input batch (unused).
+
+        Returns
+        -------
+        dict
+            The unchanged ``model_out``.
+        """
         return model_out

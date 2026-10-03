@@ -15,7 +15,16 @@ __all__ = []
 
 
 class SequenceBlock(nn.Module):
-    """Pre-normalized residual adapter for sequence-shaped modules."""
+    """Pre-normalized residual adapter for sequence-shaped modules.
+
+    Parameters
+    ----------
+    module : torch.nn.Module
+        Module mapping ``[walk, time, hidden]`` tensors to the same shape. A
+        tuple output is reduced to its first element.
+    d_model : int
+        Hidden dimension used by the pre-normalization layer.
+    """
 
     def __init__(self, module, d_model):
         super().__init__()
@@ -23,6 +32,18 @@ class SequenceBlock(nn.Module):
         self.module = module
 
     def residual(self, x):
+        """Compute the module update on the normalized input.
+
+        Parameters
+        ----------
+        x : torch.Tensor
+            Input sequences of shape ``[walk, time, hidden]``.
+
+        Returns
+        -------
+        torch.Tensor
+            Residual update with the same shape as ``x``.
+        """
         result = self.module(self.norm(x))
         if isinstance(result, tuple):
             result = result[0]
@@ -33,18 +54,53 @@ class SequenceBlock(nn.Module):
         return result
 
     def forward(self, x, residual_only=False):
+        """Apply the residual block.
+
+        Parameters
+        ----------
+        x : torch.Tensor
+            Input sequences of shape ``[walk, time, hidden]``.
+        residual_only : bool, optional
+            If True, return only the update instead of ``x + update``
+            (default: False).
+
+        Returns
+        -------
+        torch.Tensor
+            Updated sequences, or the update alone, shaped like ``x``.
+        """
         update = self.residual(x)
         return update if residual_only else x + update
 
 
 class WalkGraphLayer(nn.Module):
-    """Apply a PyG-compatible graph module to disjoint walk path graphs."""
+    """Apply a PyG-compatible graph module to disjoint walk path graphs.
+
+    Parameters
+    ----------
+    module : torch.nn.Module
+        Graph module called as ``module(x, edge_index)``.
+    bidirectional : bool, optional
+        Whether path edges are added in both directions (default: True).
+    """
 
     def __init__(self, module, bidirectional=True):
         super().__init__()
         self.module, self.bidirectional = module, bidirectional
 
     def forward(self, x):
+        """Run the graph module on each walk viewed as a path graph.
+
+        Parameters
+        ----------
+        x : torch.Tensor
+            Walk states of shape ``[walk, time, hidden]``.
+
+        Returns
+        -------
+        torch.Tensor
+            Updated walk states with the same shape as ``x``.
+        """
         walks, length, hidden = x.shape
         sources = (
             torch.arange(walks * length, device=x.device)
@@ -60,7 +116,22 @@ class WalkGraphLayer(nn.Module):
 
 
 def make_layer(config, d_model):
-    """Construct a layer from a short name or a Hydra target."""
+    """Construct a layer from a short name or a Hydra target.
+
+    Parameters
+    ----------
+    config : str or dict
+        Layer kind (``"sisa"``, ``"mamba"``, ``"gru"``, ``"mlp"``,
+        ``"transformer"`` or ``"graph"``), or a mapping with a ``kind`` key
+        plus layer options, or a Hydra config with a ``_target_`` key.
+    d_model : int
+        Hidden dimension of the layer.
+
+    Returns
+    -------
+    torch.nn.Module
+        Sequence layer preserving ``[walk, time, hidden]`` shapes.
+    """
     config = {"kind": config} if isinstance(config, str) else dict(config)
     if "_target_" in config:
         from hydra.utils import instantiate
@@ -113,7 +184,22 @@ def make_layer(config, d_model):
 
 
 class PureTorchMambaBlock(nn.Module):
-    """Selective SSM block for when mamba-ssm is unavailable."""
+    """Selective SSM block for when mamba-ssm is unavailable.
+
+    Parameters
+    ----------
+    d_model : int
+        Input and output hidden dimension.
+    d_state : int, optional
+        SSM state dimension (default: 16).
+    d_conv : int, optional
+        Kernel size of the causal depthwise convolution (default: 4).
+    expand : int, optional
+        Expansion factor of the inner dimension (default: 2).
+    scan : str, optional
+        Scan implementation, ``"parallel"`` or ``"sequential"``
+        (default: "parallel").
+    """
 
     def __init__(
         self,
@@ -149,6 +235,18 @@ class PureTorchMambaBlock(nn.Module):
         self.out_proj = nn.Linear(self.d_inner, d_model, bias=False)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Apply the selective SSM block.
+
+        Parameters
+        ----------
+        x : torch.Tensor
+            Input sequences of shape ``[batch, length, d_model]``.
+
+        Returns
+        -------
+        torch.Tensor
+            Output sequences of shape ``[batch, length, d_model]``.
+        """
         _, seqlen, _ = x.shape
         x_branch, z = self.in_proj(x).chunk(2, dim=-1)
         x_conv = self.conv1d(x_branch.transpose(1, 2))[:, :, :seqlen]
@@ -166,10 +264,29 @@ class PureTorchMambaBlock(nn.Module):
         return self.out_proj(y)
 
     def _selective_scan(self, u, dt, A, B, C):
-        """
-        Selective SSM scan.
+        """Run the selective SSM scan.
+
         Default: parallel associative scan (fast, higher peak memory).
-        Select scan="sequential" for sequential scan (lower peak memory; cluster-friendly).
+        Select scan="sequential" for sequential scan (lower peak memory;
+        cluster-friendly).
+
+        Parameters
+        ----------
+        u : torch.Tensor
+            Scan inputs of shape ``[batch, length, d_inner]``.
+        dt : torch.Tensor
+            Positive step sizes of shape ``[batch, length, d_inner]``.
+        A : torch.Tensor
+            State transition rates of shape ``[d_inner, d_state]``.
+        B : torch.Tensor
+            Input projections of shape ``[batch, length, d_state]``.
+        C : torch.Tensor
+            Output projections of shape ``[batch, length, d_state]``.
+
+        Returns
+        -------
+        torch.Tensor
+            Scan outputs of shape ``[batch, length, d_inner]``.
         """
         bsz, seqlen, d_inner = u.shape
         deltaA = torch.exp(dt.unsqueeze(-1) * A)  # (B, L, D, N)
@@ -211,6 +328,18 @@ def sequence_cumsum(x: torch.Tensor, dim: int) -> torch.Tensor:
 
     CUDA ``cumsum`` has no deterministic kernel. Under deterministic mode the
     short walk dimension is summed with a float32 lower-triangular matmul.
+
+    Parameters
+    ----------
+    x : torch.Tensor
+        Input tensor.
+    dim : int
+        Dimension along which to accumulate.
+
+    Returns
+    -------
+    torch.Tensor
+        Cumulative sum of ``x`` along ``dim`` with the dtype of ``x``.
     """
     if not (x.is_cuda and torch.are_deterministic_algorithms_enabled()):
         return torch.cumsum(x, dim=dim)
@@ -224,6 +353,24 @@ def sequence_cumsum(x: torch.Tensor, dim: int) -> torch.Tensor:
 
 
 def build_rope_cache(seq_len: int, dim: int, device, dtype):
+    """Build rotary position embedding cosine and sine tables.
+
+    Parameters
+    ----------
+    seq_len : int
+        Number of positions.
+    dim : int
+        Rotary dimension; ``dim // 2`` frequencies are used.
+    device : torch.device
+        Device of the returned tables.
+    dtype : torch.dtype
+        Dtype of the returned tables.
+
+    Returns
+    -------
+    tuple of torch.Tensor
+        Cosine and sine tables, each of shape ``[1, 1, seq_len, dim // 2]``.
+    """
     half = dim // 2
     inv_freq = 1.0 / (
         10000
@@ -238,6 +385,22 @@ def build_rope_cache(seq_len: int, dim: int, device, dtype):
 def apply_rope(
     x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor
 ) -> torch.Tensor:
+    """Apply rotary position embeddings to interleaved feature pairs.
+
+    Parameters
+    ----------
+    x : torch.Tensor
+        Input of shape ``[..., length, dim]``.
+    cos : torch.Tensor
+        Cosine table broadcastable to ``[..., length, dim // 2]``.
+    sin : torch.Tensor
+        Sine table broadcastable to ``[..., length, dim // 2]``.
+
+    Returns
+    -------
+    torch.Tensor
+        Rotated tensor with the same shape as ``x``.
+    """
     x1, x2 = x[..., 0::2], x[..., 1::2]
     return torch.stack(
         (x1 * cos - x2 * sin, x1 * sin + x2 * cos), dim=-1
@@ -245,7 +408,20 @@ def apply_rope(
 
 
 class SISALayer(nn.Module):
-    """Multi-head state-space augmented causal attention."""
+    """Multi-head state-space augmented causal attention.
+
+    Parameters
+    ----------
+    d_model : int
+        Input and output hidden dimension; must be divisible by ``n_heads``.
+    n_heads : int, optional
+        Number of attention heads (default: 8).
+    d_ssm : int, optional
+        Per-head state-space key dimension; must be even (default: 16).
+    attention_dropout : float, optional
+        Dropout probability on attention weights during training
+        (default: 0.1).
+    """
 
     def __init__(
         self,
@@ -292,6 +468,30 @@ class SISALayer(nn.Module):
         finite for arbitrarily strong learned decay. It is evaluated on every
         call and must not draw random numbers, so it omits attention dropout;
         it only replaces heads whose factored form would overflow.
+
+        Parameters
+        ----------
+        q : torch.Tensor
+            Queries of shape ``[batch, heads, length, d_head]``.
+        k : torch.Tensor
+            Keys of shape ``[batch, heads, length, d_head]``.
+        v : torch.Tensor
+            Values of shape ``[batch, heads, length, d_head]``.
+        c_ssm : torch.Tensor
+            State-space query factors of shape ``[batch, heads, length, d_ssm]``.
+        b_ssm : torch.Tensor
+            State-space key factors of shape ``[batch, heads, length, d_ssm]``.
+        g : torch.Tensor
+            Cumulative log-decay of shape ``[batch, heads, length, 1]``.
+        scale : torch.Tensor
+            Per-head state-space scale of shape ``[1, heads, 1, 1]``.
+        dh : int
+            Head dimension used to scale the logits.
+
+        Returns
+        -------
+        torch.Tensor
+            Attention outputs of shape ``[batch, heads, length, d_head]``.
         """
         length = q.shape[-2]
         causal = torch.ones(
@@ -308,12 +508,40 @@ class SISALayer(nn.Module):
     def _rotary_ssm(
         x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor
     ) -> torch.Tensor:
+        """Rotate interleaved state-space feature pairs by given phases.
+
+        Parameters
+        ----------
+        x : torch.Tensor
+            Input of shape ``[..., d_ssm]``.
+        cos : torch.Tensor
+            Cosine of the phases, shape ``[..., d_ssm // 2]``.
+        sin : torch.Tensor
+            Sine of the phases, shape ``[..., d_ssm // 2]``.
+
+        Returns
+        -------
+        torch.Tensor
+            Rotated tensor with the same shape as ``x``.
+        """
         x1, x2 = x[..., 0::2], x[..., 1::2]
         return torch.stack(
             (x1 * cos - x2 * sin, x1 * sin + x2 * cos), dim=-1
         ).flatten(-2)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Apply state-space augmented causal attention.
+
+        Parameters
+        ----------
+        x : torch.Tensor
+            Input sequences of shape ``[batch, length, d_model]``.
+
+        Returns
+        -------
+        torch.Tensor
+            Output sequences of shape ``[batch, length, d_model]``.
+        """
         bsz, length, _ = x.shape
         h, dh, ds = self.n_heads, self.d_head, self.d_ssm
         qkv = self.qkv(x).view(bsz, length, 3, h, dh).permute(2, 0, 3, 1, 4)
@@ -373,6 +601,24 @@ class SISALayer(nn.Module):
 
 
 class SISABlock(nn.Module):
+    """Pre-normalized SISA attention followed by a feed-forward network.
+
+    Parameters
+    ----------
+    d_model : int
+        Input and output hidden dimension.
+    n_heads : int, optional
+        Number of attention heads (default: 8).
+    d_ssm : int, optional
+        Per-head state-space key dimension (default: 16).
+    attention_dropout : float, optional
+        Dropout probability on attention weights (default: 0.1).
+    dropout : float, optional
+        Dropout probability inside the feed-forward network (default: 0.3).
+    expansion : int, optional
+        Hidden expansion factor of the feed-forward network (default: 2).
+    """
+
     def __init__(
         self,
         d_model: int,
@@ -399,5 +645,17 @@ class SISABlock(nn.Module):
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Apply the SISA block.
+
+        Parameters
+        ----------
+        x : torch.Tensor
+            Input sequences of shape ``[batch, length, d_model]``.
+
+        Returns
+        -------
+        torch.Tensor
+            Output sequences of shape ``[batch, length, d_model]``.
+        """
         x = x + self.sisa(self.norm1(x))
         return x + self.ffn(self.norm2(x))

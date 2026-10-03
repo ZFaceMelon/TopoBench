@@ -16,6 +16,16 @@ def walk_seed(*parts):
 
     Additive offsets alias distinct (identity, step, view) tuples; hashing
     through ``SeedSequence`` keeps every combination distinct.
+
+    Parameters
+    ----------
+    *parts : tuple
+        Integer-convertible seed components, reduced modulo ``2**63``.
+
+    Returns
+    -------
+    int
+        Seed derived from all components.
     """
     entropy = [int(part) % 2**63 for part in parts]
     return int(np.random.SeedSequence(entropy).generate_state(1)[0])
@@ -27,6 +37,12 @@ class WalkSampler:
     Cache keys include actual weights, so masked-topology pretraining cannot
     accidentally reuse an unmasked transition matrix. Derived cache state is
     intentionally excluded from neural checkpoints.
+
+    Parameters
+    ----------
+    cache_size : int, optional
+        Maximum number of cached transition distributions; 0 disables
+        caching (default: 1024).
     """
 
     def __init__(self, cache_size=1024):
@@ -36,6 +52,23 @@ class WalkSampler:
         self.cache = OrderedDict()
 
     def __call__(self, matrix, guidance=None, **kwargs):
+        """Sample walks on ``matrix`` using a cached transition distribution.
+
+        Parameters
+        ----------
+        matrix : scipy.sparse.spmatrix
+            Square weighted relation matrix over graph-local states.
+        guidance : dict, optional
+            Keyword arguments for ``guided_transition``; plain ``transition``
+            is used when empty (default: None).
+        **kwargs : dict
+            Sampling options forwarded to ``sample_neighbors``.
+
+        Returns
+        -------
+        numpy.ndarray
+            Walks of graph-local state IDs with shape ``(num_walks, length)``.
+        """
         from topobench.data.utils.trawl.encodings import (
             guided_transition,
             transition,
@@ -95,6 +128,33 @@ def sample_walks(
     Return graph-local state IDs. Empty relations return no walks; inactive
     states cannot consume their budget. Coverage is the historical inverse
     visitation start policy, not adaptive stopping.
+
+    Parameters
+    ----------
+    matrix : scipy.sparse.spmatrix
+        Square weighted relation matrix over graph-local states.
+    k : int, optional
+        Number of walks to sample (default: 32).
+    length : int, optional
+        Number of states per walk (default: 32).
+    seed : int, optional
+        Seed for the random generator (default: 0).
+    start_policy : str, optional
+        Start-state policy, ``"uniform"`` or ``"coverage"``
+        (default: "coverage").
+    epsilon : float, optional
+        Coverage-change threshold below which coverage starts fall back to
+        uniform starts (default: 0.05).
+    reverse : bool, optional
+        If True, append the reversal of every walk (default: False).
+    guidance : dict, optional
+        Keyword arguments for ``guided_transition``; plain ``transition`` is
+        used when empty (default: None).
+
+    Returns
+    -------
+    numpy.ndarray
+        Walks of graph-local state IDs with shape ``(num_walks, length)``.
     """
     from topobench.data.utils.trawl.encodings import (
         guided_transition,
@@ -146,6 +206,38 @@ def sample_neighbors(
 
     ``rows`` may carry ``prepare_walk_rows(neighbors, probs)`` computed once
     for a graph that is sampled repeatedly.
+
+    Parameters
+    ----------
+    neighbors : list of list of int
+        Neighbor state indices for each state.
+    probs : list of list of float
+        Transition weights aligned with ``neighbors``.
+    k : int, optional
+        Number of walks to sample (default: 32).
+    length : int, optional
+        Number of states per walk (default: 32).
+    seed : int, optional
+        Seed for the random generator (default: 0).
+    start_policy : str, optional
+        Start-state policy, ``"uniform"`` or ``"coverage"``
+        (default: "coverage").
+    epsilon : float, optional
+        Coverage-change threshold below which coverage starts fall back to
+        uniform starts (default: 0.05).
+    reverse : bool, optional
+        If True, append the reversal of every walk (default: False).
+    branch_split : int, optional
+        If given, the first ``k // 2`` walks start in states
+        ``[0, branch_split)`` and the rest in ``[branch_split, n)``
+        (default: None).
+    rows : WalkRows, optional
+        Precomputed output of ``prepare_walk_rows`` (default: None).
+
+    Returns
+    -------
+    numpy.ndarray
+        Walks of state indices with shape ``(num_walks, length)``.
     """
     if k < 1 or length < 1 or start_policy not in {"uniform", "coverage"}:
         raise ValueError("Invalid walk budget, length or start policy")
@@ -202,6 +294,18 @@ def prepare_walk_rows(neighbors, neigh_probs):
 
     NaN, infinite and nonpositive weights are unavailable transitions.
     Preparing once per graph avoids repeating this on every walk step.
+
+    Parameters
+    ----------
+    neighbors : list of list of int
+        Neighbor state indices for each state.
+    neigh_probs : list of list of float
+        Transition weights aligned with ``neighbors``.
+
+    Returns
+    -------
+    WalkRows
+        One ``(neighbors, weights)`` pair per state with cleaned weights.
     """
     rows = WalkRows()
     for nbrs, row in zip(neighbors, neigh_probs, strict=True):
@@ -217,6 +321,16 @@ def _numpy_sum(values):
     NumPy adds fewer than eight values sequentially and otherwise keeps eight
     running partial sums (pairwise summation). Reproducing that order keeps
     sampled walks bit-identical to ``Generator.choice`` without its overhead.
+
+    Parameters
+    ----------
+    values : list of float
+        Values to sum.
+
+    Returns
+    -------
+    float
+        Sum of ``values``.
     """
     n = len(values)
     if n < 8:
@@ -253,6 +367,26 @@ def simulate_nbrw_sparse(
     arithmetic reproduces NumPy's results bit for bit while avoiding its
     per-call overhead on these short rows. Pass ``rows`` from
     ``prepare_walk_rows`` when sampling several walks on one graph.
+
+    Parameters
+    ----------
+    neighbors : list of list of int
+        Neighbor state indices for each state.
+    neigh_probs : list of list of float
+        Transition weights aligned with ``neighbors``.
+    start : int
+        Initial state index.
+    length : int
+        Number of states in the walk.
+    rng : numpy.random.Generator
+        Random generator supplying one uniform draw per step.
+    rows : WalkRows, optional
+        Precomputed output of ``prepare_walk_rows`` (default: None).
+
+    Returns
+    -------
+    list of int
+        Visited state indices, starting with ``start``.
     """
     if rows is None:
         rows = prepare_walk_rows(neighbors, neigh_probs)

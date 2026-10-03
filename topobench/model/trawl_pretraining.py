@@ -21,6 +21,21 @@ def historical_accumulation_weight(module, batch, batch_idx):
 
     Lightning divides every microbatch loss by the configured accumulation
     count. Historical TRAWL divides by the actual logical batch sample count.
+
+    Parameters
+    ----------
+    module : lightning.LightningModule
+        Module being trained; its attached trainer supplies the loader and
+        accumulation settings.
+    batch : torch_geometric.data.Data
+        Current microbatch carrying ``trawl_counts``.
+    batch_idx : int
+        Index of the microbatch within the epoch.
+
+    Returns
+    -------
+    float
+        Factor applied to the microbatch loss (1.0 without accumulation).
     """
     trainer = module._trainer
     if trainer is None or trainer.accumulate_grad_batches == 1:
@@ -47,6 +62,20 @@ class FullPrecisionValidation:
     evaluation_autocast = True
 
     def validation_step(self, batch, batch_idx):
+        """Compute the validation loss, disabling autocast if configured.
+
+        Parameters
+        ----------
+        batch : torch_geometric.data.Data
+            Validation batch.
+        batch_idx : int
+            Index of the batch.
+
+        Returns
+        -------
+        torch.Tensor
+            Validation loss.
+        """
         if self.evaluation_autocast:
             return self._step(batch, validation=True, batch_idx=batch_idx)
         with torch.autocast(self.device.type, enabled=False):
@@ -54,10 +83,20 @@ class FullPrecisionValidation:
 
 
 def validation_frequency(trainer):
-    """Epochs between validation checks, for epoch-level plateau schedulers.
+    """Return epochs between validation checks, for plateau schedulers.
 
     A plateau scheduler stepped on epochs without validation either fails
     (the monitored metric is absent) or reuses a stale value.
+
+    Parameters
+    ----------
+    trainer : lightning.Trainer or None
+        Attached trainer, if any.
+
+    Returns
+    -------
+    int
+        The trainer's ``check_val_every_n_epoch``, or 1 when unavailable.
     """
     if trainer is None:
         return 1
@@ -70,6 +109,19 @@ class PretrainingCheckpoint(ModelCheckpoint):
     ``min_delta`` matches ``EarlyStopping`` so the restored encoder is the
     one that last reset patience. Resuming into a different run directory
     keeps the earlier best instead of letting Lightning discard its score.
+
+    Parameters
+    ----------
+    *args : tuple
+        Positional arguments forwarded to ``ModelCheckpoint``.
+    min_delta : float, optional
+        Minimum improvement of the monitored metric that counts as better
+        (default: 0.0).
+    resume_dir : str or pathlib.Path, optional
+        Directory of the resumed run, searched for the earlier best
+        checkpoint (default: None).
+    **kwargs : dict
+        Keyword arguments forwarded to ``ModelCheckpoint``.
     """
 
     def __init__(self, *args, min_delta=0.0, resume_dir=None, **kwargs):
@@ -80,6 +132,20 @@ class PretrainingCheckpoint(ModelCheckpoint):
         self.resume_dir = resume_dir
 
     def check_monitor_top_k(self, trainer, current=None):
+        """Check whether ``current`` improves on the best by ``min_delta``.
+
+        Parameters
+        ----------
+        trainer : lightning.Trainer
+            Trainer running the fit.
+        current : torch.Tensor, optional
+            Current value of the monitored metric (default: None).
+
+        Returns
+        -------
+        bool
+            Whether a checkpoint should be saved.
+        """
         if (
             current is None
             or self.min_delta == 0
@@ -96,6 +162,16 @@ class PretrainingCheckpoint(ModelCheckpoint):
         return trainer.strategy.reduce_boolean_decision(bool(improved))
 
     def load_state_dict(self, state_dict):
+        """Restore callback state and carry over the previous best checkpoint.
+
+        When resuming into a different directory, the earlier best checkpoint
+        is copied into ``dirpath`` so its score is kept.
+
+        Parameters
+        ----------
+        state_dict : dict
+            Callback state saved by ``ModelCheckpoint``.
+        """
         super().load_state_dict(state_dict)
         previous = state_dict.get("dirpath")
         best = state_dict.get("best_model_path")
@@ -128,6 +204,27 @@ class TRAWLPretrainer(
 
     Only training examples update weights. Validation uses a deterministic
     mask. Labels are never accessed. The supervised head is not optimized.
+
+    Parameters
+    ----------
+    backbone : torch.nn.Module
+        TRAWL backbone to pretrain.
+    lr : float, optional
+        AdamW learning rate (default: 1e-4).
+    weight_decay : float, optional
+        AdamW weight decay (default: 1e-3).
+    mask_probability : float, optional
+        Probability of masking each state and relation, in (0, 1]
+        (default: 0.15).
+    objectives : dict, optional
+        Loss weights keyed by ``"features"``, ``"colors"`` and
+        ``"topology"`` (default: None, meaning ``{"features": 1.0}``).
+    feature_encoder : torch.nn.Module, optional
+        Feature encoder applied before the backbone (default: None, meaning
+        identity).
+    target_widths : list of int, optional
+        Feature reconstruction width per rank; defaults to the input width
+        of each backbone feature layer (default: None).
     """
 
     def __init__(
@@ -181,6 +278,23 @@ class TRAWLPretrainer(
         )
 
     def _step(self, batch, validation=False, batch_idx=0):
+        """Mask the batch, encode it and compute the weighted pretraining loss.
+
+        Parameters
+        ----------
+        batch : torch_geometric.data.Data
+            Batch of TRAWL-transformed graphs.
+        validation : bool, optional
+            If True, use the fixed validation mask and log the validation
+            loss (default: False).
+        batch_idx : int, optional
+            Index of the batch, used to seed the mask (default: 0).
+
+        Returns
+        -------
+        torch.Tensor
+            Pretraining loss.
+        """
         masked = batch.clone()
         # Masking edits device fields below; host copies would be stale and
         # could leak held-out connectivity into walk sampling.
@@ -320,9 +434,30 @@ class TRAWLPretrainer(
         return loss
 
     def training_step(self, batch, batch_idx):
+        """Compute the training loss.
+
+        Parameters
+        ----------
+        batch : torch_geometric.data.Data
+            Training batch.
+        batch_idx : int
+            Index of the batch.
+
+        Returns
+        -------
+        torch.Tensor
+            Training loss.
+        """
         return self._step(batch, batch_idx=batch_idx)
 
     def configure_optimizers(self):
+        """Configure AdamW with a validation-loss plateau scheduler.
+
+        Returns
+        -------
+        dict
+            Optimizer and learning-rate scheduler configuration.
+        """
         optimizer = torch.optim.AdamW(
             self.parameters(), lr=self.lr, weight_decay=self.weight_decay
         )
@@ -340,7 +475,22 @@ class TRAWLPretrainer(
 
 
 class ContinuousPretrainer(TRAWLPretrainer):
-    """Original walk-mean signal/PSE/absolute-step reconstruction objective."""
+    """Original walk-mean signal/PSE/absolute-step reconstruction objective.
+
+    Parameters
+    ----------
+    backbone : torch.nn.Module
+        Continuous TRAWL backbone providing ``reconstruction_loss``.
+    lr : float, optional
+        AdamW learning rate (default: 1e-4).
+    weight_decay : float, optional
+        AdamW weight decay (default: 1e-3).
+    mask_probability : float, optional
+        Training mask ratio passed to ``reconstruction_loss``
+        (default: 0.15).
+    **kwargs : dict
+        Ignored ``TRAWLPretrainer`` options (e.g. ``objectives``).
+    """
 
     def __init__(
         self,
@@ -356,6 +506,23 @@ class ContinuousPretrainer(TRAWLPretrainer):
         self.mask_probability = mask_probability
 
     def _step(self, batch, validation=False, batch_idx=0):
+        """Set the sampling context and compute the reconstruction loss.
+
+        Parameters
+        ----------
+        batch : torch_geometric.data.Data
+            Batch of TRAWL-transformed graphs.
+        validation : bool, optional
+            If True, disable masking and log the validation loss
+            (default: False).
+        batch_idx : int, optional
+            Index of the microbatch (default: 0).
+
+        Returns
+        -------
+        torch.Tensor
+            Reconstruction loss.
+        """
         accumulation = (
             self.trainer.accumulate_grad_batches
             if self._trainer is not None
@@ -383,6 +550,20 @@ class ContinuousPretrainer(TRAWLPretrainer):
         return loss
 
     def training_step(self, batch, batch_idx):
+        """Compute the training loss with historical accumulation weighting.
+
+        Parameters
+        ----------
+        batch : torch_geometric.data.Data
+            Training batch.
+        batch_idx : int
+            Index of the microbatch.
+
+        Returns
+        -------
+        torch.Tensor
+            Weighted training loss.
+        """
         loss = self._step(batch, batch_idx=batch_idx)
         return loss * historical_accumulation_weight(self, batch, batch_idx)
 
@@ -390,7 +571,26 @@ class ContinuousPretrainer(TRAWLPretrainer):
 def run_pretraining(
     model, datamodule, config, trainer_config, output_dir=None
 ):
-    """Train, restore the best encoder, then leave supervised fitting to runner."""
+    """Train, restore the best encoder, then leave supervised fitting to runner.
+
+    Parameters
+    ----------
+    model : TBModel
+        Model whose TRAWL backbone and feature encoder are pretrained in
+        place.
+    datamodule : lightning.LightningDataModule
+        Data module providing the training and validation loaders.
+    config : omegaconf.DictConfig
+        Pretraining options (``lr``, ``weight_decay``, ``mask_probability``,
+        ``objectives``, ``max_epochs``, ``patience`` and optional
+        ``min_delta``, ``ckpt_path`` and ``reset_head``).
+    trainer_config : omegaconf.DictConfig
+        Hydra config used to instantiate the pretraining trainer.
+    output_dir : str or pathlib.Path, optional
+        Run directory; checkpoints and metrics are written to its
+        ``pretraining`` subdirectory, otherwise to a temporary directory
+        (default: None).
+    """
     from topobench.nn.backbones.general.trawl import TRAWL
 
     if not isinstance(model.backbone, TRAWL):

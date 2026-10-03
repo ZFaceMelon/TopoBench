@@ -312,6 +312,14 @@ def test_branch_gate_requires_historical_sampling():
         _continuous(branch_gate={"prior": 0.7})
 
 
+def _cpu_autocast_enabled():
+    # ``torch.is_autocast_enabled(device_type)`` is unavailable before torch 2.4.
+    try:
+        return torch.is_autocast_enabled("cpu")
+    except TypeError:
+        return torch.is_autocast_cpu_enabled()
+
+
 @pytest.mark.parametrize("training", [False, True])
 def test_evaluation_can_disable_autocast(training):
     from topobench.model.model import TBModel
@@ -323,9 +331,12 @@ def test_evaluation_can_disable_autocast(training):
     module.backbone, module.state_str = nn.Identity(), "Validation"
     module._device = torch.device("cpu")
     seen = []
-    module.forward = lambda batch: (
-        seen.append(torch.is_autocast_enabled("cpu")) or {}
-    )
+
+    def forward(batch):
+        seen.append(_cpu_autocast_enabled())
+        return {}
+
+    module.forward = forward
     module.process_outputs = lambda model_out, batch: model_out
     module.loss = lambda model_out, batch: model_out
     module.evaluator = type("E", (), {"update": lambda self, out: None})()
@@ -337,7 +348,7 @@ def test_evaluation_can_disable_autocast(training):
         device = torch.device("cpu")
 
         def _step(self, batch, validation=False, batch_idx=0):
-            return torch.is_autocast_enabled("cpu")
+            return _cpu_autocast_enabled()
 
     probe = Probe()
     probe.evaluation_autocast = False

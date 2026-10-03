@@ -13,12 +13,33 @@ def arpack_start(size: int) -> np.ndarray:
     with every call in the process, so identical graphs could receive
     different eigenvectors (sign and degenerate-subspace choices). A fixed
     start makes each solve a pure function of its matrix.
+
+    Parameters
+    ----------
+    size : int
+        Length of the starting vector.
+
+    Returns
+    -------
+    np.ndarray
+        Standard-normal vector drawn from a generator seeded with 0.
     """
     return np.random.default_rng(0).normal(size=size)
 
 
 def _dominant_left_vector(P: sp.csr_matrix) -> np.ndarray:
-    """Frozen ARPACK convention for one weakly connected component."""
+    """Frozen ARPACK convention for one weakly connected component.
+
+    Parameters
+    ----------
+    P : sp.csr_matrix
+        Row-stochastic transition matrix of the component.
+
+    Returns
+    -------
+    np.ndarray
+        Nonnegative stationary vector with unit L1 norm (when nonzero).
+    """
     n = P.shape[0]
     if n <= 2:
         values, vectors = np.linalg.eig(P.toarray().T)
@@ -50,8 +71,7 @@ def _dominant_left_vector(P: sp.csr_matrix) -> np.ndarray:
 
 
 def compute_stationary_distribution(P: sp.csr_matrix) -> np.ndarray:
-    """
-    Find the dominant left eigenvector π such that  π^T P = π^T.
+    """Find the dominant left eigenvector π such that  π^T P = π^T.
 
     Equivalently, π is the right eigenvector of P^T with eigenvalue 1.
     The result is scaled so that ||π||_1 = 1.
@@ -60,6 +80,16 @@ def compute_stationary_distribution(P: sp.csr_matrix) -> np.ndarray:
     single ARPACK vector can vanish on whole components (making the Chung
     Laplacian the identity there). Components are therefore solved
     separately and weighted by their share of states.
+
+    Parameters
+    ----------
+    P : sp.csr_matrix
+        Row-stochastic transition matrix.
+
+    Returns
+    -------
+    np.ndarray
+        Stationary distribution π of shape ``(n,)``.
     """
     P = sp.csr_matrix(P)
     n = P.shape[0]
@@ -79,12 +109,25 @@ def compute_stationary_distribution(P: sp.csr_matrix) -> np.ndarray:
 
 
 def compute_chung_laplacian(P: sp.csr_matrix, pi: np.ndarray) -> sp.csr_matrix:
-    """
-    Chung normalized Laplacian (symmetric form):
+    """Chung normalized Laplacian (symmetric form).
+
+    Computes
 
       L = I - (Φ^{1/2} P Φ^{-1/2} + Φ^{-1/2} P^T Φ^{1/2}) / 2
 
     where Φ = diag(π).
+
+    Parameters
+    ----------
+    P : sp.csr_matrix
+        Row-stochastic transition matrix.
+    pi : np.ndarray
+        Stationary distribution of ``P``; zero entries get a zero inverse.
+
+    Returns
+    -------
+    sp.csr_matrix
+        Symmetric Chung Laplacian of shape ``(n, n)``.
     """
     n = P.shape[0]
     sqrt_pi = np.sqrt(pi)

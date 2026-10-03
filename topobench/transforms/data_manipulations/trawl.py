@@ -17,7 +17,18 @@ from topobench.data.utils.trawl.encodings import positional_encodings
 
 
 def as_csr(value):
-    """Convert dense or any PyTorch sparse layout to unsigned CPU CSR."""
+    """Convert dense or any PyTorch sparse layout to unsigned CPU CSR.
+
+    Parameters
+    ----------
+    value : torch.Tensor or array_like or scipy.sparse.spmatrix
+        Dense or sparse matrix.
+
+    Returns
+    -------
+    scipy.sparse.csr_matrix
+        Float64 CSR matrix of absolute values.
+    """
     if isinstance(value, torch.Tensor):
         value = value.detach().cpu()
         if value.layout != torch.strided:
@@ -36,6 +47,25 @@ def relation_matrix(name, counts, incidences, data):
     Adjacency means shared upper cells; coadjacency means shared lower cells.
     Multi-hop incidence is the product along consecutive ranks. Explicit
     lifting-provided relation matrices take precedence over derived ones.
+
+    Parameters
+    ----------
+    name : str
+        Neighborhood name such as ``"up_incidence-0"`` or
+        ``"2-down_adjacency-2"``.
+    counts : list of int
+        Number of cells per rank.
+    incidences : dict
+        CSR incidence matrix per rank ``r >= 1``, shaped
+        ``(counts[r - 1], counts[r])``.
+    data : torch_geometric.data.Data
+        Lifted data, checked for an explicit matrix stored under ``name``.
+
+    Returns
+    -------
+    tuple
+        ``(rank, target, matrix)``: source rank, target rank and the CSR
+        relation matrix of shape ``(counts[rank], counts[target])``.
     """
     match = re.fullmatch(
         r"(?:(\d+)-)?(up|down)_(adjacency|incidence)-(\d+)", name
@@ -77,6 +107,40 @@ class TRAWLTransform(BaseTransform):
     Plain graphs become rank 0 states; ``incidence_hyperedges`` is adapted to
     rank 1. Missing higher ranks are empty, not fabricated. Featureless cells
     receive a constant feature, while existing lifted features are preserved.
+
+    Parameters
+    ----------
+    max_rank : int, optional
+        Highest cell rank to include (default: 2).
+    graph : str, optional
+        Walk graph: ``"hasse"``, ``"augmented_hasse"`` or ``"cell_overlap"``
+        (default: "augmented_hasse").
+    neighborhoods : list of str, optional
+        Relation names resolved by ``relation_matrix``; defaults to
+        ``up_incidence-r`` for every rank below ``max_rank`` (default: None).
+    bidirectional : bool, optional
+        If True, symmetrize every relation (default: True).
+    overlap_ranks : list of int, optional
+        Ranks included in the ``"cell_overlap"`` graph; defaults to
+        ``1..max_rank`` (default: None).
+    encodings : dict, optional
+        Keyword arguments for ``positional_encodings`` (default: None,
+        meaning ``{"local": True, "rw_steps": 8}``).
+    encoding_scope : str, optional
+        Compute encodings per relation (``"separate"``) or on their union
+        (``"union"``) (default: "separate").
+    color_key : str, optional
+        Data attribute holding one nonnegative color ID per cell; defaults
+        to colouring cells by rank (default: None).
+    color_refinement : bool, optional
+        If True, split encoding graphs by unordered color pair
+        (default: False).
+    num_colors : int, optional
+        Number of color IDs; defaults to ``max_rank + 1`` (default: None).
+    seed : int, optional
+        Seed passed to ``positional_encodings`` (default: 0).
+    **kwargs : dict
+        Ignored extra options.
     """
 
     def __init__(
@@ -117,7 +181,18 @@ class TRAWLTransform(BaseTransform):
         self.seed = int(seed)
 
     def finalize_dataset(self, data_list):
-        """Give absent ranks the same empty feature shape as populated ranks."""
+        """Give absent ranks the same empty feature shape as populated ranks.
+
+        Parameters
+        ----------
+        data_list : list of torch_geometric.data.Data
+            Transformed graphs, updated in place.
+
+        Returns
+        -------
+        list of torch_geometric.data.Data
+            The same graphs with consistent per-rank feature widths.
+        """
         for rank in range(self.max_rank + 1):
             key = f"trawl_signal_{rank}"
             widths = {
@@ -137,6 +212,18 @@ class TRAWLTransform(BaseTransform):
         return data_list
 
     def forward(self, data):
+        """Build the TRAWL walk graph, features, colors and encodings.
+
+        Parameters
+        ----------
+        data : torch_geometric.data.Data
+            Lifted (or plain) graph.
+
+        Returns
+        -------
+        torch_geometric.data.Data
+            The input data with ``trawl_*`` fields added.
+        """
         counts = [int(data.num_nodes)] + [0] * self.max_rank
         if counts[0] <= 0:
             raise ValueError("TRAWL requires at least one rank-0 cell")

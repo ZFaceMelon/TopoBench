@@ -35,11 +35,31 @@ class RankedModelCheckpoint(ModelCheckpoint):
         self.kth_value = self.best_k_models[tied[-1]]
 
     def _update_best_and_save(self, current, trainer, monitor_candidates):
+        """Update the top-K ranking, evicting the latest tied worst checkpoint.
+
+        Parameters
+        ----------
+        current : torch.Tensor
+            Current value of the monitored metric.
+        trainer : lightning.pytorch.Trainer
+            The running trainer.
+        monitor_candidates : dict
+            Metrics available for monitoring and checkpoint naming.
+        """
         self._select_latest_kth()
         super()._update_best_and_save(current, trainer, monitor_candidates)
         self._select_latest_kth()
 
     def on_fit_end(self, trainer, pl_module):
+        """Write the final top-K index next to the checkpoints.
+
+        Parameters
+        ----------
+        trainer : lightning.pytorch.Trainer
+            The running trainer.
+        pl_module : lightning.pytorch.LightningModule
+            The trained module.
+        """
         super().on_fit_end(trainer, pl_module)
         if not trainer.is_global_zero or not self.best_model_path:
             return
@@ -63,7 +83,14 @@ class RankedModelCheckpoint(ModelCheckpoint):
         temporary.replace(destination)
 
     def restore_ranking(self, relocate=False):
-        """Recover this run's ranking if a launcher returned only its best path."""
+        """Recover this run's ranking if a launcher returned only its best path.
+
+        Parameters
+        ----------
+        relocate : bool, optional
+            If True, match checkpoints by file name and resolve them relative
+            to the directory of ``best_model_path`` (default: False).
+        """
         if self.best_k_models or not self.best_model_path:
             return
         source = Path(self.best_model_path).parent / "checkpoint_index.json"

@@ -49,6 +49,18 @@ class TBOptimizer(AbstractOptimizer):
 
     def __repr__(self) -> str:
         def name(factory):
+            """Return a readable name for an optimizer or scheduler factory.
+
+            Parameters
+            ----------
+            factory : Any
+                Callable, possibly a ``functools.partial``.
+
+            Returns
+            -------
+            str
+                Name of the wrapped callable or of its type.
+            """
             # functools.partial exposes the wrapped callable as ``func``.
             factory = getattr(factory, "func", factory)
             return getattr(factory, "__name__", type(factory).__name__)

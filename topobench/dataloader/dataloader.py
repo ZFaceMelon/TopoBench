@@ -82,6 +82,16 @@ class TBDataloader(LightningDataModule):
 
         Returns ``None`` outside an initialized multi-process group, which
         keeps single-device loaders unchanged.
+
+        Parameters
+        ----------
+        dataset : torch.utils.data.Dataset
+            Evaluation dataset to shard.
+
+        Returns
+        -------
+        UnpaddedDistributedSampler or None
+            Sampler for this rank, or None without multiple processes.
         """
         from torch import distributed
 

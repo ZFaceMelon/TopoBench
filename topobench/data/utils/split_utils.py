@@ -97,6 +97,18 @@ def seeded_stratified_split(labels, parameters):
     validation and test, both with ``random_state=data_seed``. This is the
     split used by the original TRAWL experiments; it differs from the
     ``stratified`` split type, which selects one of ten precomputed folds.
+
+    Parameters
+    ----------
+    labels : array-like
+        Labels used for stratification.
+    parameters : DictConfig
+        Configuration parameters with ``train_prop`` and ``data_seed``.
+
+    Returns
+    -------
+    dict
+        Dictionary containing the train, validation and test indices, with keys "train", "valid", and "test".
     """
     labels = np.asarray(labels).reshape(-1)
     indices = np.arange(len(labels))
@@ -116,7 +128,21 @@ def seeded_stratified_split(labels, parameters):
 
 
 def imported_split(labels, parameters):
-    """Read explicit split IDs, rejecting overlap, duplicates and missing IDs."""
+    """Read explicit split IDs, rejecting overlap, duplicates and missing IDs.
+
+    Parameters
+    ----------
+    labels : array-like
+        Labels, used only for the number of samples.
+    parameters : DictConfig
+        Configuration parameters with ``split_file``, an ``.npz`` file with
+        "train", "valid" and "test" arrays.
+
+    Returns
+    -------
+    dict
+        Dictionary containing the train, validation and test indices, with keys "train", "valid", and "test".
+    """
     with np.load(parameters.split_file, allow_pickle=False) as saved:
         splits = {
             key: np.asarray(saved[key]) for key in ("train", "valid", "test")

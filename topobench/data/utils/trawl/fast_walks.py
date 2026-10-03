@@ -20,7 +20,19 @@ available = njit is not None
 
 
 def walk_csr(rows):
-    """Flatten ``prepare_walk_rows`` output into CSR arrays for the kernel."""
+    """Flatten ``prepare_walk_rows`` output into CSR arrays for the kernel.
+
+    Parameters
+    ----------
+    rows : list of tuple
+        Per-state ``(neighbors, weights)`` pairs from ``prepare_walk_rows``.
+
+    Returns
+    -------
+    tuple
+        ``(indptr, indices, weights, width)`` where ``width`` is the largest
+        row length (at least 1).
+    """
     lengths = np.fromiter((len(nbrs) for nbrs, _ in rows), np.int64, len(rows))
     indptr = np.zeros(len(rows) + 1, dtype=np.int64)
     np.cumsum(lengths, out=indptr[1:])
@@ -156,7 +168,24 @@ if available:
 
 
 def walk(csr, start, length, rng):
-    """Sample one walk with the compiled kernel; returns a Python list."""
+    """Sample one walk with the compiled kernel.
+
+    Parameters
+    ----------
+    csr : tuple
+        ``(indptr, indices, weights, width)`` arrays from ``walk_csr``.
+    start : int
+        Initial state index.
+    length : int
+        Number of states in the walk.
+    rng : numpy.random.Generator
+        Random generator supplying one uniform draw per step.
+
+    Returns
+    -------
+    list of int
+        Visited state indices, starting with ``start``.
+    """
     indptr, indices, weights, width = csr
     return _walk(
         indptr, indices, weights, width, int(start), int(length), rng

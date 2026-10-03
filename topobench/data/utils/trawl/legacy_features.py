@@ -30,6 +30,19 @@ def extract_atom_types(data, attr_dim=0) -> np.ndarray:
 
     The first ``attr_dim`` columns are continuous node attributes, as with
     the historical ``TRAWL_NODE_ATTR_DIM`` setting, and are skipped.
+
+    Parameters
+    ----------
+    data : torch_geometric.data.Data
+        Graph whose ``x`` holds categorical or one-hot atom labels.
+    attr_dim : int, optional
+        Number of leading continuous attribute columns to skip (default: 0).
+
+    Returns
+    -------
+    np.ndarray
+        Atom-type IDs of shape ``(num_nodes,)``, clipped to
+        ``[0, NUM_ATOM_TYPES - 1]``; zeros when no labels are available.
     """
     n = int(data.num_nodes)
     if data.x is None:
@@ -53,7 +66,22 @@ def pack_hyperedge_atoms(
     endpoints: list[tuple[int, ...]],
     atom_types: np.ndarray,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Per-hyperedge atom IDs + mask, padded to MAX_HYPEREDGE_ATOMS."""
+    """Per-hyperedge atom IDs + mask, padded to MAX_HYPEREDGE_ATOMS.
+
+    Parameters
+    ----------
+    endpoints : list[tuple[int, ...]]
+        Node indices of each hyperedge.
+    atom_types : np.ndarray
+        Atom-type ID of each node.
+
+    Returns
+    -------
+    atoms : np.ndarray
+        Atom-type IDs of shape ``(m, MAX_HYPEREDGE_ATOMS)``, zero-padded.
+    mask : np.ndarray
+        Float mask of the same shape, 1.0 at filled positions.
+    """
     m = len(endpoints)
     atoms = np.zeros((m, MAX_HYPEREDGE_ATOMS), dtype=np.int64)
     mask = np.zeros((m, MAX_HYPEREDGE_ATOMS), dtype=np.float32)
@@ -65,7 +93,18 @@ def pack_hyperedge_atoms(
 
 
 def _bond_type(raw) -> int:
-    """Integer bond type from a scalar, a one-column or a one-hot edge row."""
+    """Integer bond type from a scalar, a one-column or a one-hot edge row.
+
+    Parameters
+    ----------
+    raw : array_like
+        Edge attribute value or row.
+
+    Returns
+    -------
+    int
+        Active column of a one-hot row, otherwise the leading value.
+    """
     values = np.ravel(np.asarray(raw))
     if values.size == 1:
         return int(values[0])
@@ -79,7 +118,22 @@ def _bond_type(raw) -> int:
 def unique_undirected_bonds(
     data,
 ) -> tuple[list[tuple[int, ...]], list[float], list[int]]:
-    """Size-2 hyperedges from PyG edge_index + integer/float edge_attr."""
+    """Size-2 hyperedges from PyG edge_index + integer/float edge_attr.
+
+    Parameters
+    ----------
+    data : torch_geometric.data.Data
+        Graph with ``edge_index`` and optional ``edge_attr``.
+
+    Returns
+    -------
+    endpoints : list[tuple[int, ...]]
+        Sorted ``(u, v)`` pair of each unique undirected bond.
+    weights : list[float]
+        Bond weight ``1 + bond_type`` (1.0 without edge attributes).
+    bond_types : list[int]
+        Bond type clipped to ``[0, 3]`` (0 without edge attributes).
+    """
     ei = data.edge_index.cpu().numpy()
     ea = None if data.edge_attr is None else data.edge_attr.cpu().numpy()
     seen: dict[tuple[int, int], int] = {}
@@ -110,7 +164,31 @@ def lift_rings(
     weights: list[float],
     bond_types: list[int],
 ) -> tuple[list[tuple[int, ...]], list[float], list[int]]:
-    """Append 5-/6-cycles as hyperedges (cellular lifting)."""
+    """Append 5-/6-cycles as hyperedges (cellular lifting).
+
+    Cycles are taken from the networkx cycle basis; the input lists are
+    extended in place.
+
+    Parameters
+    ----------
+    data : torch_geometric.data.Data
+        Molecular graph.
+    endpoints : list[tuple[int, ...]]
+        Node indices of the existing hyperedges.
+    weights : list[float]
+        Weights of the existing hyperedges.
+    bond_types : list[int]
+        Type tokens of the existing hyperedges.
+
+    Returns
+    -------
+    endpoints : list[tuple[int, ...]]
+        Input endpoints with ring hyperedges appended.
+    weights : list[float]
+        Input weights with weight 3.0 appended for each ring.
+    bond_types : list[int]
+        Input types with ``TOKEN_RING5``/``TOKEN_RING6`` appended.
+    """
     G = to_networkx(data, to_undirected=True)
     for cycle in nx.cycle_basis(G):
         if len(cycle) in (5, 6):
@@ -121,6 +199,21 @@ def lift_rings(
 
 
 def hyperedge_token_from_type(size: int, bond_type: int) -> int:
+    """Vocabulary token of a hyperedge from its size and bond type.
+
+    Parameters
+    ----------
+    size : int
+        Number of nodes in the hyperedge.
+    bond_type : int
+        Bond type of the hyperedge.
+
+    Returns
+    -------
+    int
+        ``TOKEN_RING5`` or ``TOKEN_RING6`` for 5-/6-node hyperedges,
+        otherwise the bond type clipped to ``[0, 3]``.
+    """
     if size == 5:
         return TOKEN_RING5
     if size == 6:
@@ -132,6 +225,26 @@ def build_sparse_dual(
     endpoints: list[tuple[int, ...]],
     weights: list[float],
 ) -> tuple[list[list[int]], list[list[float]]]:
+    """Build the sparse hyperedge dual graph with row-normalized weights.
+
+    Two hyperedges are adjacent when they share nodes; the edge weight is
+    the product of their weights times the number of shared nodes.
+    Isolated hyperedges get a self-loop.
+
+    Parameters
+    ----------
+    endpoints : list[tuple[int, ...]]
+        Node indices of each hyperedge.
+    weights : list[float]
+        Weight of each hyperedge.
+
+    Returns
+    -------
+    neighbors : list[list[int]]
+        Dual-graph neighbors of each hyperedge.
+    neigh_weights : list[list[float]]
+        Transition probabilities to each neighbor (rows sum to 1).
+    """
     m = len(endpoints)
     node_to_edges: dict[int, list[int]] = defaultdict(list)
     for e, nodes in enumerate(endpoints):
@@ -171,6 +284,27 @@ def local_topological_pe(
     bond_types: list[int],
     neighbors: list[list[int]],
 ) -> np.ndarray:
+    """Local topological positional encoding of each hyperedge.
+
+    Channels: normalized dual degree, log weight, size, bond flag,
+    token, 5-ring flag, 6-ring flag and a constant bias.
+
+    Parameters
+    ----------
+    endpoints : list[tuple[int, ...]]
+        Node indices of each hyperedge.
+    weights : list[float]
+        Weight of each hyperedge.
+    bond_types : list[int]
+        Type token of each hyperedge.
+    neighbors : list[list[int]]
+        Dual-graph neighbors of each hyperedge.
+
+    Returns
+    -------
+    np.ndarray
+        Float32 array of shape ``(m, LOCAL_PE_DIM)``.
+    """
     m = len(endpoints)
     max_deg = max((len(neighbors[i]) for i in range(m)), default=1)
     pe = np.zeros((m, LOCAL_PE_DIM), dtype=np.float32)
@@ -197,9 +331,27 @@ def laplacian_guided_neigh_probs(
     gamma: float = 1.0,
     diffusion_t: float = 0.1,
 ) -> list[list[float]]:
-    """
-    Reweight dual-graph transitions with a heat-kernel prior on the Chung Laplacian,
-    matching the HOPSE-style guidance used in trawl_zinc_sisa.
+    """Reweight dual-graph transitions with a Chung-Laplacian heat-kernel prior.
+
+    Matches the HOPSE-style guidance used in trawl_zinc_sisa: transitions
+    are multiplied by ``|exp(-t L)| ** gamma`` and renormalized. Rows whose
+    guided mass vanishes fall back to the original probabilities.
+
+    Parameters
+    ----------
+    neighbors : list[list[int]]
+        Dual-graph neighbors of each hyperedge.
+    neigh_probs : list[list[float]]
+        Transition probabilities to each neighbor.
+    gamma : float, optional
+        Exponent applied to the heat-kernel magnitude (default: 1.0).
+    diffusion_t : float, optional
+        Heat-kernel diffusion time (default: 0.1).
+
+    Returns
+    -------
+    list[list[float]]
+        Guided transition probabilities aligned with ``neighbors``.
     """
     import scipy.linalg
     import scipy.sparse as sp
@@ -252,16 +404,37 @@ def hasse_spectral_pse(
     electrostatic_betas=(0.1, 0.5, 1.0),
     laplacian_dim=8,
 ) -> np.ndarray:
-    """
-    Compute extra node-wise PSEs on the hyperedge Hasse dual graph:
+    """Compute extra node-wise PSEs on the hyperedge Hasse dual graph.
+
+    The encodings are:
       1) HKdiagSE: diagonal entries of exp(-t L_H)
       2) Electrostatic potentials: p_beta = (L_H + beta I)^{-1} q
       3) LapPE: low-frequency eigenvectors (Laplacian Eigenmaps)
 
     Uses Chung Laplacian on the Markov transition defined by neigh_probs.
     We use a truncated eigendecomposition for speed; features are approximate.
-    Returns:
-      pse: (m, HK_DIM + ELECTRO_DIM + laplacian_dim) float32
+
+    Parameters
+    ----------
+    neighbors : list[list[int]]
+        Dual-graph neighbors of each hyperedge.
+    neigh_probs : list[list[float]]
+        Transition probabilities to each neighbor.
+    q_vec : np.ndarray or None, optional
+        Charge vector for the electrostatic potentials; a constant charge is
+        used when None or mismatched in length (default: None).
+    heat_times : sequence of float, optional
+        Diffusion times for HKdiagSE.
+    electrostatic_betas : sequence of float, optional
+        Regularization shifts for the electrostatic potentials.
+    laplacian_dim : int, optional
+        Number of Laplacian eigenvector channels (default: 8).
+
+    Returns
+    -------
+    np.ndarray
+        Float32 array of shape
+        ``(m, len(heat_times) + len(electrostatic_betas) + laplacian_dim)``.
     """
     import scipy.linalg
     import scipy.sparse as sp
@@ -418,6 +591,27 @@ def empirical_rwse(
     n_samples: int = 8,
     seed: int = 0,
 ) -> np.ndarray:
+    """Monte Carlo random-walk return probabilities of each hyperedge.
+
+    Parameters
+    ----------
+    neighbors : list[list[int]]
+        Dual-graph neighbors of each hyperedge.
+    neigh_probs : list[list[float]]
+        Transition probabilities to each neighbor.
+    k_rwse : int, optional
+        Number of walk steps (default: 8).
+    n_samples : int, optional
+        Number of sampled walks per start hyperedge (default: 8).
+    seed : int, optional
+        Random seed (default: 0).
+
+    Returns
+    -------
+    np.ndarray
+        Float32 array of shape ``(m, k_rwse)``; entry ``t - 1`` is the
+        fraction of walks at their start after ``t`` steps.
+    """
     m = len(neighbors)
     rwse = np.zeros((m, k_rwse), dtype=np.float32)
     rng = np.random.default_rng(seed)
@@ -441,7 +635,26 @@ def rich_molecular_structural_pe(
     atom_types: np.ndarray,
     attr_dim: int = 0,
 ) -> np.ndarray:
-    """Target-free local molecular context for NCI1-style node labels."""
+    """Target-free local molecular context for NCI1-style node labels.
+
+    Parameters
+    ----------
+    data : torch_geometric.data.Data
+        Molecular graph.
+    endpoints : list[tuple[int, ...]]
+        Node indices of each hyperedge.
+    atom_types : np.ndarray
+        Atom-type ID of each node.
+    attr_dim : int, optional
+        Number of leading continuous attribute columns in ``data.x``; when
+        positive, six attribute summary channels are added (default: 0).
+
+    Returns
+    -------
+    np.ndarray
+        Float32 array with one row of degree, neighbor-label, cycle, local,
+        atom and global context features per hyperedge.
+    """
     graph = to_networkx(data, to_undirected=True)
     n = max(int(data.num_nodes), 1)
     degrees = np.asarray([graph.degree(v) for v in range(n)], dtype=np.float32)

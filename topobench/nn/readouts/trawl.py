@@ -5,7 +5,32 @@ from torch import nn
 
 
 class TRAWLReadout(nn.Module):
-    """Predict from graph embeddings, mean walk logits, or contextual nodes."""
+    """Predict from graph embeddings, mean walk logits, or contextual nodes.
+
+    Parameters
+    ----------
+    hidden_dim : int
+        Width of node embeddings, and of graph embeddings if ``graph_dim`` is
+        None.
+    out_channels : int
+        Number of output channels.
+    task_level : str, optional
+        ``"node"`` or ``"graph"`` (default: "graph").
+    graph_dim : int, optional
+        Width of graph and walk embeddings (default: None).
+    head_hidden : int, optional
+        Hidden width of an MLP head; a linear head is used if None
+        (default: None).
+    dropout : float, optional
+        Dropout probability inside the head and DeepSet networks
+        (default: 0.0).
+    aggregation : str, optional
+        Graph aggregation: ``"embedding"``, ``"walk_logits"`` or
+        ``"deepset"`` (default: "embedding").
+    input_dropout : float, optional
+        Dropout probability on head inputs; defaults to ``dropout`` if None
+        (default: None).
+    """
 
     def __init__(
         self,
@@ -56,6 +81,20 @@ class TRAWLReadout(nn.Module):
             )
 
     def forward(self, model_out, batch):
+        """Compute logits from the backbone output.
+
+        Parameters
+        ----------
+        model_out : dict
+            Backbone output dictionary.
+        batch : torch_geometric.data.Batch
+            Input batch (unused).
+
+        Returns
+        -------
+        dict
+            ``model_out`` with ``logits`` added.
+        """
         if self.task_level == "node":
             logits = self.head(model_out["x_0"])
         else:

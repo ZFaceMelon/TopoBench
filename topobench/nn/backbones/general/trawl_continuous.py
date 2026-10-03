@@ -26,6 +26,17 @@ class ContinuousWalkInput(nn.Module):
 
     BatchNorm sees all walks in the minibatch together, as in the original
     implementation. Synthetic steps are constructed after normalization.
+
+    Parameters
+    ----------
+    signal_dim : int
+        Width of the continuous state features.
+    pe_dim : int
+        Width of the positional/structural encodings.
+    hidden_dim : int
+        Output hidden dimension.
+    embed_dim : int, optional
+        Width of each per-channel embedding (default: 64).
     """
 
     def __init__(self, signal_dim, pe_dim, hidden_dim, embed_dim=64):
@@ -39,6 +50,20 @@ class ContinuousWalkInput(nn.Module):
         self.in_proj = nn.Linear(embed_dim * 3, hidden_dim)
 
     def forward(self, signals, pe):
+        """Embed walk states, synthetic steps and encodings.
+
+        Parameters
+        ----------
+        signals : torch.Tensor
+            State features of shape ``[walk, time, signal_dim]``.
+        pe : torch.Tensor
+            Encodings of shape ``[walk, time, pe_dim]``.
+
+        Returns
+        -------
+        torch.Tensor
+            Walk tokens of shape ``[walk, time, hidden_dim]``.
+        """
         signals = self.node_norm(signals.transpose(1, 2)).transpose(1, 2)
         pe = self.pe_norm(pe.transpose(1, 2)).transpose(1, 2)
         difference = (signals[:, 1:] - signals[:, :-1]).abs()
@@ -57,6 +82,28 @@ class ContinuousTRAWL(TRAWL):
     Uses the same layer factory, optimizer, losses and runner as base TRAWL.
     Transform-provided ``trawl_continuous`` features must align with walk
     states. This variant processes the complete walk minibatch jointly.
+
+    Parameters
+    ----------
+    signal_dim : int, optional
+        Width of the continuous state features (default: 4).
+    pe_dim : int, optional
+        Width of the positional/structural encodings (default: 32).
+    embed_dim : int, optional
+        Width of each input channel embedding (default: 64).
+    sampling_protocol : str, optional
+        ``"stable"`` or ``"historical"`` walk sampling (default: "stable").
+    branch_gate : dict, optional
+        Settings (``prior``, ``hidden_dim``) of a learned gate weighting the
+        two lifting branches; requires historical sampling (default: None).
+    loss : dict, optional
+        Auxiliary reconstruction loss settings (``weight``, ``decay_epochs``,
+        ``mask_probability``, ``objective``) (default: None).
+    cache_size : int, optional
+        Maximum entries of the structure and evaluation walk caches
+        (default: 65536).
+    **kwargs : dict
+        Additional arguments passed to ``TRAWL``.
     """
 
     def __init__(
@@ -131,6 +178,13 @@ class ContinuousTRAWL(TRAWL):
             )
 
     def initialize(self, data_list):
+        """Check that data widths match the configured input layers.
+
+        Parameters
+        ----------
+        data_list : list of torch_geometric.data.Data
+            Transformed training graphs.
+        """
         for data in data_list:
             if (
                 data.trawl_continuous.shape[1]
@@ -159,6 +213,18 @@ class ContinuousTRAWL(TRAWL):
     )
 
     def _host(self, batch):
+        """Return CPU copies of ``host_fields`` without waiting for the device.
+
+        Parameters
+        ----------
+        batch : torch_geometric.data.Batch
+            Batch, optionally carrying precomputed ``trawl_host`` arrays.
+
+        Returns
+        -------
+        dict
+            Mapping from field name to NumPy array.
+        """
         host = getattr(batch, "trawl_host", None)
         if host is None:
             host = {
@@ -169,7 +235,30 @@ class ContinuousTRAWL(TRAWL):
         return host
 
     def _graph_structure(self, edges, weights, count, first, split):
-        """Cached sampler inputs for one graph, keyed by its exact contents."""
+        """Return cached sampler inputs for one graph, keyed by its contents.
+
+        Parameters
+        ----------
+        edges : numpy.ndarray
+            Transition edges of shape ``[edges, 3]`` (source, target,
+            relation).
+        weights : numpy.ndarray
+            Transition weights of shape ``[edges]``.
+        count : int
+            Number of walk states in the graph.
+        first : int
+            Number of rank-0 states, excluded from historical sampling.
+        split : int
+            Lifting branch split index (0 when unused).
+
+        Returns
+        -------
+        key : bytes
+            Content hash of the graph structure.
+        structure : tuple or scipy.sparse.csr_matrix
+            Neighbor lists for historical sampling, otherwise a sparse
+            transition matrix.
+        """
         digest = hashlib.blake2b(digest_size=16)
         for part in (edges, weights, np.array([count, first, split])):
             digest.update(np.ascontiguousarray(part).tobytes())
@@ -201,7 +290,26 @@ class ContinuousTRAWL(TRAWL):
         return key, structure
 
     def _sample(self, key, structure, seed, first, split):
-        """Sample one view; evaluation draws are cached (their seeds are fixed)."""
+        """Sample one view; evaluation draws are cached (their seeds are fixed).
+
+        Parameters
+        ----------
+        key : bytes
+            Content hash of the graph structure.
+        structure : tuple or scipy.sparse.csr_matrix
+            Sampler inputs returned by ``_graph_structure``.
+        seed : int
+            Sampling seed.
+        first : int
+            Number of rank-0 states, offset added to historical paths.
+        split : int
+            Lifting branch split index (0 when unused).
+
+        Returns
+        -------
+        numpy.ndarray
+            Walk state indices of shape ``[walk, time]``.
+        """
         cache_key = (key, seed)
         if not self.training:
             cached = self._eval_walk_cache.get(cache_key)
@@ -233,8 +341,26 @@ class ContinuousTRAWL(TRAWL):
     def _walk_inputs(self, batch, views=None):
         """Sample walks and gather their state features.
 
-        Returns signals, positions, walk graph IDs, walk paths and a dict of
-        host-side bookkeeping (paths and per-graph/per-view walk counts).
+        Parameters
+        ----------
+        batch : torch_geometric.data.Batch
+            Batch produced by the TRAWL transform.
+        views : int, optional
+            Number of walk views per graph. If None, one view is used in
+            training and ``eval_views`` otherwise (default: None).
+
+        Returns
+        -------
+        signals : torch.Tensor
+            State features along walks, shape ``[walk, time, signal_dim]``.
+        positions : torch.Tensor
+            Encodings along walks, shape ``[walk, time, pe_dim]``.
+        graph_ids : torch.Tensor
+            Graph index of each walk.
+        paths : torch.Tensor
+            Batch-level state indices of shape ``[walk, time]``.
+        info : dict
+            Host-side bookkeeping (paths and per-graph/per-view walk counts).
         """
         if views is None:
             views = 1 if self.training else self.eval_views
@@ -319,6 +445,24 @@ class ContinuousTRAWL(TRAWL):
         )
 
     def encode_walks(self, signals, positions, mask_ratio=0.0):
+        """Encode walks with the sequence layers.
+
+        Parameters
+        ----------
+        signals : torch.Tensor
+            State features of shape ``[walk, time, signal_dim]``.
+        positions : torch.Tensor
+            Encodings of shape ``[walk, time, pe_dim]``.
+        mask_ratio : float, optional
+            Fraction of walk steps masked during training (default: 0.0).
+
+        Returns
+        -------
+        tokens : torch.Tensor
+            Encoded states of shape ``[walk, time, hidden_dim]``.
+        pooled : torch.Tensor
+            Pooled walk embeddings of shape ``[walk, output_dim]``.
+        """
         if mask_ratio and self.training:
             keep = (
                 torch.rand(*signals.shape[:2], 1, device=signals.device)
@@ -337,6 +481,20 @@ class ContinuousTRAWL(TRAWL):
         return tokens, self.dropout(self._pool(tokens))
 
     def reconstruction_loss(self, batch, mask_ratio=0.15):
+        """Compute a masked walk-summary reconstruction loss.
+
+        Parameters
+        ----------
+        batch : torch_geometric.data.Batch
+            Batch produced by the TRAWL transform.
+        mask_ratio : float, optional
+            Fraction of walk steps masked before encoding (default: 0.15).
+
+        Returns
+        -------
+        torch.Tensor
+            Mean squared reconstruction error.
+        """
         # Historical SSL validation scored one walk view, independent of TTA.
         signals, positions, _, _, _ = self._walk_inputs(batch, views=1)
         _, pooled = self.encode_walks(
@@ -353,6 +511,20 @@ class ContinuousTRAWL(TRAWL):
         return F.mse_loss(self.reconstruction_decoder(pooled), targets)
 
     def forward(self, batch):
+        """Sample and encode walks for every graph in the batch.
+
+        Parameters
+        ----------
+        batch : torch_geometric.data.Batch
+            Batch produced by the TRAWL transform.
+
+        Returns
+        -------
+        dict
+            Node features ``x_0`` and ``batch_0``, graph and walk embeddings
+            with their indices, labels, readout metadata and, when enabled,
+            branch walk weights and the auxiliary reconstruction loss.
+        """
         signals, positions, graph_ids, paths, info = self._walk_inputs(batch)
         tokens, pooled = self.encode_walks(signals, positions)
         sizes, device = info["sizes"], pooled.device

@@ -33,7 +33,21 @@ VOCAB_SIZE, MAX_HYPEREDGE_ATOMS, NUM_ATOM_TYPES, LOCAL_PE_DIM = 11, 18, 64, 8
 
 
 def extract_atom_types(data, attr_dim=0) -> np.ndarray:
-    """Integer atom-type IDs from PyG data.x (categorical or one-hot)."""
+    """Integer atom-type IDs from PyG data.x (categorical or one-hot).
+
+    Parameters
+    ----------
+    data : torch_geometric.data.Data
+        Graph whose ``x`` holds categorical or one-hot atom labels.
+    attr_dim : int, optional
+        Number of leading continuous attribute columns to skip (default: 0).
+
+    Returns
+    -------
+    np.ndarray
+        Atom-type IDs of shape ``(num_nodes,)``, clipped to
+        ``[0, NUM_ATOM_TYPES - 1]``; zeros when no labels are available.
+    """
     n = int(data.num_nodes)
     if data.x is None:
         return np.zeros(n, dtype=np.int64)
@@ -56,7 +70,22 @@ def pack_hyperedge_atoms(
     endpoints: list[tuple[int, ...]],
     atom_types: np.ndarray,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Per-hyperedge atom IDs + mask, padded to MAX_HYPEREDGE_ATOMS."""
+    """Per-hyperedge atom IDs + mask, padded to MAX_HYPEREDGE_ATOMS.
+
+    Parameters
+    ----------
+    endpoints : list[tuple[int, ...]]
+        Node indices of each hyperedge.
+    atom_types : np.ndarray
+        Atom-type ID of each node.
+
+    Returns
+    -------
+    atoms : np.ndarray
+        Atom-type IDs of shape ``(m, MAX_HYPEREDGE_ATOMS)``, zero-padded.
+    mask : np.ndarray
+        Float mask of the same shape, 1.0 at filled positions.
+    """
     m = len(endpoints)
     atoms = np.zeros((m, MAX_HYPEREDGE_ATOMS), dtype=np.int64)
     mask = np.zeros((m, MAX_HYPEREDGE_ATOMS), dtype=np.float32)
@@ -73,7 +102,31 @@ def lift_rings(
     weights: list[float],
     bond_types: list[int],
 ) -> tuple[list[tuple[int, ...]], list[float], list[int]]:
-    """Append 5-/6-cycles as hyperedges (cellular lifting)."""
+    """Append 5-/6-cycles as hyperedges (cellular lifting).
+
+    Cycles are taken from the networkx cycle basis; the input lists are
+    extended in place.
+
+    Parameters
+    ----------
+    data : torch_geometric.data.Data
+        Molecular graph.
+    endpoints : list[tuple[int, ...]]
+        Node indices of the existing hyperedges.
+    weights : list[float]
+        Weights of the existing hyperedges.
+    bond_types : list[int]
+        Type tokens of the existing hyperedges.
+
+    Returns
+    -------
+    endpoints : list[tuple[int, ...]]
+        Input endpoints with ring hyperedges appended.
+    weights : list[float]
+        Input weights with weight 3.0 appended for each ring.
+    bond_types : list[int]
+        Input types with ``TOKEN_RING5``/``TOKEN_RING6`` appended.
+    """
     G = to_networkx(data, to_undirected=True)
     for cycle in nx.cycle_basis(G):
         if len(cycle) in (5, 6):
@@ -89,7 +142,32 @@ def lift_short_cycles(
     weights: list[float],
     bond_types: list[int],
 ) -> tuple[list[tuple[int, ...]], list[float], list[int]]:
-    """Append unique triangle/4-cycle cells plus the champion's 5/6-cycle basis."""
+    """Append unique triangle/4-cycle cells plus the champion's 5/6-cycle basis.
+
+    Cells whose node set already exists are skipped; the input lists are
+    extended in place.
+
+    Parameters
+    ----------
+    data : torch_geometric.data.Data
+        Molecular graph.
+    endpoints : list[tuple[int, ...]]
+        Node indices of the existing hyperedges.
+    weights : list[float]
+        Weights of the existing hyperedges.
+    bond_types : list[int]
+        Type tokens of the existing hyperedges.
+
+    Returns
+    -------
+    endpoints : list[tuple[int, ...]]
+        Input endpoints with the new cycle cells appended.
+    weights : list[float]
+        Input weights with 2.5 (triangle), 2.75 (4-cycle) or 3.0 (5/6-cycle)
+        appended per new cell.
+    bond_types : list[int]
+        Input types with the matching ring tokens appended.
+    """
     G = to_networkx(data, to_undirected=True)
     seen = {frozenset(nodes) for nodes in endpoints}
 
@@ -140,7 +218,31 @@ def lift_stars(
     weights: list[float],
     bond_types: list[int],
 ) -> tuple[list[tuple[int, ...]], list[float], list[int]]:
-    """Append each nontrivial closed 1-hop neighborhood as an ego/star cell."""
+    """Append each nontrivial closed 1-hop neighborhood as an ego/star cell.
+
+    Neighborhoods with fewer than three nodes or an existing node set are
+    skipped; the input lists are extended in place.
+
+    Parameters
+    ----------
+    data : torch_geometric.data.Data
+        Molecular graph.
+    endpoints : list[tuple[int, ...]]
+        Node indices of the existing hyperedges.
+    weights : list[float]
+        Weights of the existing hyperedges.
+    bond_types : list[int]
+        Type tokens of the existing hyperedges.
+
+    Returns
+    -------
+    endpoints : list[tuple[int, ...]]
+        Input endpoints with star cells appended.
+    weights : list[float]
+        Input weights with weight 2.0 appended for each star.
+    bond_types : list[int]
+        Input types with ``TOKEN_STAR`` appended for each star.
+    """
     G = to_networkx(data, to_undirected=True)
     seen = {frozenset(nodes) for nodes in endpoints}
     for center in G.nodes():
@@ -169,6 +271,24 @@ def build_cycle18_adj3(
     of length at most 18. Adjacency is the union of A01/A02, A10/A12, and
     A20/A21. This is a single-graph TRAWL analogue of HOPSE's separate Adj-3
     neighborhood ensemble.
+
+    Parameters
+    ----------
+    data : torch_geometric.data.Data
+        Molecular graph.
+
+    Returns
+    -------
+    endpoints : list[tuple[int, ...]]
+        Node indices of the node, edge and cycle cells, in that order.
+    weights : list[float]
+        Cell weights (1.0 for nodes, bond weights for edges, 3.0 for cycles).
+    bond_types : list[int]
+        Cell tokens (``TOKEN_NODE``, bond types, ring/long-cycle tokens).
+    neighbors : list[list[int]]
+        Sorted Adj-3 neighbors of each cell (self-loop when isolated).
+    probs : list[list[float]]
+        Uniform transition probabilities over each cell's neighbors.
     """
     G = to_networkx(data, to_undirected=True)
     edge_cells, edge_weights, edge_types = unique_undirected_bonds(data)
@@ -203,6 +323,13 @@ def build_cycle18_adj3(
     neighbors_sets: list[set[int]] = [set() for _ in endpoints]
 
     def connect_group(indices: list[int]) -> None:
+        """Connect every pair of the given cells in ``neighbors_sets``.
+
+        Parameters
+        ----------
+        indices : list[int]
+            Cell indices to connect pairwise.
+        """
         for i in range(len(indices)):
             for j in range(i + 1, len(indices)):
                 a, b = indices[i], indices[j]
@@ -270,6 +397,27 @@ def build_dual_champion_cycle18(
     same-rank relations. Duplicate cells are shared between channels. The
     conservative cycle_mix keeps the new topology complementary instead of
     letting its denser adjacency dominate the random walk.
+
+    Parameters
+    ----------
+    data : torch_geometric.data.Data
+        Molecular graph.
+    cycle_mix : float, optional
+        Weight of the cycle18/Adj-3 transitions relative to the champion
+        transitions before row normalization (default: 0.35).
+
+    Returns
+    -------
+    endpoints : list[tuple[int, ...]]
+        Node indices of the deduplicated cells.
+    weights : list[float]
+        Weight of each cell (from its first occurrence).
+    bond_types : list[int]
+        Token of each cell (from its first occurrence).
+    neighbors : list[list[int]]
+        Sorted neighbors of each cell in the fused transition.
+    probs : list[list[float]]
+        Row-normalized fused transition probabilities.
     """
     champ_ep, champ_w, champ_t = unique_undirected_bonds(data)
     champ_ep, champ_w, champ_t = lift_rings(data, champ_ep, champ_w, champ_t)
@@ -281,6 +429,22 @@ def build_dual_champion_cycle18(
     lookup: dict[tuple[int, ...], int] = {}
 
     def add_cell(cell: tuple[int, ...], weight: float, token: int) -> int:
+        """Register a cell once by its sorted node set and return its index.
+
+        Parameters
+        ----------
+        cell : tuple[int, ...]
+            Node indices of the cell.
+        weight : float
+            Cell weight, stored only for a new cell.
+        token : int
+            Cell token, stored only for a new cell.
+
+        Returns
+        -------
+        int
+            Index of the (new or existing) cell in ``endpoints``.
+        """
         key = tuple(sorted(int(v) for v in cell))
         idx = lookup.get(key)
         if idx is None:
@@ -342,6 +506,26 @@ def build_dual_learnable_gate(
     Keeping the components disconnected makes the first half of sampled walks
     champion-only and the second half cycle18-only. The neural model can then
     learn a per-graph mixture without changing the total walk budget.
+
+    Parameters
+    ----------
+    data : torch_geometric.data.Data
+        Molecular graph.
+
+    Returns
+    -------
+    endpoints : list[tuple[int, ...]]
+        Champion cells followed by cycle18 cells.
+    weights : list[float]
+        Weight of each cell.
+    bond_types : list[int]
+        Token of each cell.
+    neighbors : list[list[int]]
+        Neighbors of each cell; cycle18 indices are offset by ``split``.
+    probs : list[list[float]]
+        Transition probabilities aligned with ``neighbors``.
+    split : int
+        Number of champion cells (index of the first cycle18 cell).
     """
     champ_ep, champ_w, champ_t = unique_undirected_bonds(data)
     champ_ep, champ_w, champ_t = lift_rings(data, champ_ep, champ_w, champ_t)
@@ -363,6 +547,20 @@ def build_dual_learnable_gate(
 
 
 def hyperedge_token_from_type(size: int, bond_type: int) -> int:
+    """Vocabulary token of a hyperedge from its stored type.
+
+    Parameters
+    ----------
+    size : int
+        Number of nodes in the hyperedge (unused; kept for API parity).
+    bond_type : int
+        Stored type token of the hyperedge.
+
+    Returns
+    -------
+    int
+        Type token clipped to ``[0, VOCAB_SIZE - 1]``.
+    """
     return int(np.clip(bond_type, 0, VOCAB_SIZE - 1))
 
 
@@ -372,6 +570,27 @@ def local_topological_pe(
     bond_types: list[int],
     neighbors: list[list[int]],
 ) -> np.ndarray:
+    """Local topological positional encoding of each hyperedge.
+
+    Channels: normalized dual degree, log weight, size, bond flag,
+    normalized token, cycle flag, star flag and a constant bias.
+
+    Parameters
+    ----------
+    endpoints : list[tuple[int, ...]]
+        Node indices of each hyperedge.
+    weights : list[float]
+        Weight of each hyperedge.
+    bond_types : list[int]
+        Type token of each hyperedge.
+    neighbors : list[list[int]]
+        Dual-graph neighbors of each hyperedge.
+
+    Returns
+    -------
+    np.ndarray
+        Float32 array of shape ``(m, LOCAL_PE_DIM)``.
+    """
     m = len(endpoints)
     max_deg = max((len(neighbors[i]) for i in range(m)), default=1)
     pe = np.zeros((m, LOCAL_PE_DIM), dtype=np.float32)

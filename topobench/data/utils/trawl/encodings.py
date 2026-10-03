@@ -11,7 +11,21 @@ from topobench.data.utils.trawl.sampling import (
 
 
 def transition(matrix):
-    """Row-normalize positive weights, retaining isolated states."""
+    """Row-normalize positive weights, retaining isolated states.
+
+    Non-finite and nonpositive weights are dropped; empty rows receive a
+    self-loop.
+
+    Parameters
+    ----------
+    matrix : scipy.sparse.spmatrix
+        Square weighted adjacency matrix.
+
+    Returns
+    -------
+    scipy.sparse.spmatrix
+        Row-stochastic transition matrix.
+    """
     matrix = matrix.astype(np.float64).tocsr(copy=True)
     matrix.data = np.where(
         np.isfinite(matrix.data) & (matrix.data > 0), matrix.data, 0
@@ -27,6 +41,16 @@ def chung_laplacian(matrix):
 
     Laziness makes iteration converge on bipartite Hasse graphs. Disconnected
     components retain their uniform-initialization mass.
+
+    Parameters
+    ----------
+    matrix : scipy.sparse.spmatrix
+        Square weighted adjacency matrix.
+
+    Returns
+    -------
+    scipy.sparse.spmatrix
+        Symmetric Chung Laplacian of shape ``(n, n)``.
     """
     p = transition(matrix)
     n = p.shape[0]
@@ -47,6 +71,30 @@ def guided_transition(matrix, gamma=0.2, diffusion_t=0.1, dense_limit=2048):
 
     Exact dense decomposition is deliberately bounded: never silently change
     an experiment to an approximation when its graph exceeds the limit.
+
+    Parameters
+    ----------
+    matrix : scipy.sparse.spmatrix
+        Square weighted adjacency matrix.
+    gamma : float, optional
+        Nonnegative exponent on the heat-kernel magnitude; 0 disables
+        guidance (default: 0.2).
+    diffusion_t : float, optional
+        Nonnegative heat-kernel diffusion time (default: 0.1).
+    dense_limit : int, optional
+        Maximum number of states for the dense eigendecomposition
+        (default: 2048).
+
+    Returns
+    -------
+    scipy.sparse.csr_matrix
+        Row-stochastic guided transition matrix.
+
+    Raises
+    ------
+    ValueError
+        If ``gamma`` or ``diffusion_t`` is negative, or guidance is enabled
+        and the matrix exceeds ``dense_limit``.
     """
     if gamma < 0 or diffusion_t < 0:
         raise ValueError(
@@ -81,6 +129,42 @@ def positional_encodings(
 
     Per-relation inactive states receive zeros. LapPE signs are canonicalized;
     repeated eigenvalues still admit basis rotations across numerical backends.
+
+    Parameters
+    ----------
+    matrix : scipy.sparse.spmatrix
+        Square weighted adjacency matrix of one relation.
+    local : bool, optional
+        Whether to include log-degree and neighbor-count channels
+        (default: True).
+    rw_steps : int, optional
+        Number of nonbacktracking random-walk steps; 0 disables RWSE
+        (default: 8).
+    rw_samples : int, optional
+        Number of sampled walks per active state (default: 32).
+    heat_times : sequence of float, optional
+        Nonnegative heat-kernel diagonal times (default: ()).
+    electrostatic_betas : sequence of float, optional
+        Positive regularization shifts for degree-charge potentials
+        (default: ()).
+    laplacian_dim : int, optional
+        Number of Laplacian eigenvector channels (default: 0).
+    seed : int, optional
+        Random seed for walk sampling (default: 0).
+    dense_limit : int, optional
+        Maximum number of states for spectral encodings (default: 2048).
+
+    Returns
+    -------
+    np.ndarray
+        Float32 array of shape ``(n, d)`` with the selected encodings
+        concatenated column-wise.
+
+    Raises
+    ------
+    ValueError
+        If dimensions, sample counts, heat times or betas are invalid, or a
+        spectral encoding exceeds ``dense_limit``.
     """
     n = matrix.shape[0]
     if rw_steps < 0 or rw_samples < 1 or laplacian_dim < 0:
