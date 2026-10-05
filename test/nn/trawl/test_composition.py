@@ -1,7 +1,5 @@
 """Regression checks for interactions between independently configured pieces."""
 
-import copy
-
 import numpy as np
 import pytest
 import scipy.sparse as sp
@@ -12,7 +10,6 @@ from topobench.data.utils.trawl.sampling import WalkSampler
 from topobench.model.trawl_pretraining import TRAWLPretrainer
 from topobench.nn.encoders.trawl import TRAWLFeatureEncoder
 from topobench.nn.readouts.trawl import TRAWLReadout
-from topobench.optimizer.schedulers import warmup_cosine
 from topobench.transforms.data_manipulations.trawl import TRAWLTransform
 
 from .test_trawl import collate, complex_data, model, prepare
@@ -100,28 +97,3 @@ def test_pretraining_updates_native_feature_encoder():
     trainer.log = lambda *args, **kwargs: None
     trainer._step(collate([data])).backward()
     assert encoder.encoder.projections[0].weight.grad is not None
-
-
-def test_warmup_cosine_resume_matches_uninterrupted_schedule():
-    optimizer = torch.optim.Adam([nn.Parameter(torch.ones(1))], lr=0.1)
-    scheduler = warmup_cosine(optimizer, epochs=10, warmup_epochs=2)
-    assert optimizer.param_groups[0]["lr"] == pytest.approx(0.001)
-    for _ in range(4):
-        optimizer.step()
-        scheduler.step()
-    opt_state, sched_state = (
-        copy.deepcopy(optimizer.state_dict()),
-        copy.deepcopy(scheduler.state_dict()),
-    )
-    optimizer.step()
-    scheduler.step()
-    expected = optimizer.param_groups[0]["lr"]
-    resumed_optimizer = torch.optim.Adam([nn.Parameter(torch.ones(1))], lr=0.1)
-    resumed_scheduler = warmup_cosine(
-        resumed_optimizer, epochs=10, warmup_epochs=2
-    )
-    resumed_optimizer.load_state_dict(opt_state)
-    resumed_scheduler.load_state_dict(sched_state)
-    resumed_optimizer.step()
-    resumed_scheduler.step()
-    assert resumed_optimizer.param_groups[0]["lr"] == pytest.approx(expected)

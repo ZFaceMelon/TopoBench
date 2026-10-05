@@ -49,7 +49,6 @@ class TinyLoader:
         "nci1_hybrid",
         "nci1_sisa",
         "nci1_mamba",
-        "zinc",
         "custom_layers",
         "adjacency",
         "mixed",
@@ -71,9 +70,7 @@ def test_recipe_compiles(recipe):
             loss=cfg.loss,
         )
         assert type(model.backbone) is TRAWL
-        assert len(model.backbone.encoders[0]) == (
-            4 if recipe == "zinc" else 5
-        )
+        assert len(model.backbone.encoders[0]) == 5
         if recipe.startswith(("proteins", "nci1")):
             assert cfg.dataset.split_params.split_type == "seeded_stratified"
             assert cfg.transforms.lifting.max_cell_length == 6

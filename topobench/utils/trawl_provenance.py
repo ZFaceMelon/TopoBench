@@ -112,7 +112,6 @@ def write_run_manifest(config, model, datamodule):
             "evaluator/checkpoint.py",
             "evaluator/evaluator.py",
             "callbacks/model_checkpoint.py",
-            "optimizer/schedulers.py",
             "run.py",
             "model/model.py",
             "dataloader/samplers.py",

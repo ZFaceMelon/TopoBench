@@ -15,10 +15,9 @@ Every behavior is selected by configuration; no code branches on dataset names.
   positional/structural encodings after any lifting.
 - `data/utils/trawl/`: CPU encodings and walk sampling (optional `numba` kernel).
 - `nn/encoders/trawl.py`, `nn/readouts/trawl.py`: feature adapter and task head.
-- `model/trawl_pretraining.py`, `optimizer/schedulers.py`,
-  `evaluator/checkpoint.py`, `callbacks/model_checkpoint.py`,
-  `utils/trawl_provenance.py`: optional pretraining, warmup-cosine schedule,
-  top-K checkpoint evaluation and run manifests.
+- `model/trawl_pretraining.py`, `evaluator/checkpoint.py`,
+  `callbacks/model_checkpoint.py`, `utils/trawl_provenance.py`: optional
+  pretraining, top-K checkpoint evaluation and run manifests.
 - Configs: `configs/model/combinatorial/trawl.yaml`, `configs/model/graph/trawl.yaml`,
   `configs/transforms/trawl_*.yaml`, `configs/experiment/trawl/`.
 
@@ -135,7 +134,6 @@ options above:
 python -m topobench experiment=trawl/proteins_mamba
 python -m topobench experiment=trawl/proteins_hybrid
 python -m topobench experiment=trawl/nci1_hybrid    # also nci1_sisa, nci1_mamba
-python -m topobench experiment=trawl/zinc
 python -m topobench -m experiment=trawl/proteins_hybrid seed=40,41,42,43,44
 ```
 

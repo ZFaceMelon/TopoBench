@@ -31,14 +31,9 @@ class TBOptimizer(AbstractOptimizer):
         )
 
         # CHANGED: Store the scheduler config so we can access keys like 'monitor' later
-        # A callable scheduler factory (e.g. a partial) carries no such keys.
-        self.scheduler_config = (
-            {} if callable(scheduler) or scheduler is None else scheduler
-        )
+        self.scheduler_config = scheduler
 
-        if callable(scheduler):
-            self.scheduler = scheduler
-        elif scheduler is not None:
+        if scheduler is not None:
             scheduler_id = scheduler.get("scheduler_id")
             scheduler_params = scheduler.get("scheduler_params")
             self.scheduler = functools.partial(
