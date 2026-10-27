@@ -30,7 +30,9 @@ backbone:
       d_conv: 4
       expand: 2
       backend: torch
-      scan: parallel
+      # The parallel scan keeps O(log length) full-size states per layer for
+      # backward; the sequential scan needs far less memory.
+      scan: sequential
     sisa:
       n_heads: 8
       d_ssm: 16
@@ -46,7 +48,8 @@ backbone:
   num_colors: 0
   move_embedding: true
   dropout: 0.0
-  checkpoint_layers: false
+  # Recompute layer activations in backward instead of storing them.
+  checkpoint_layers: true
   occurrence_pooling: mean
   graph_readout: walks
 
@@ -68,6 +71,8 @@ backbone_wrapper:
     guidance:
       gamma: 0.2
       diffusion_t: 0.1
+      # Heat guidance needs a dense eigendecomposition; complexes with more
+      # cells raise an error. Set gamma to 0 for large graphs.
       dense_limit: 2048
 
 readout:

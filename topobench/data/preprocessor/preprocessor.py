@@ -248,7 +248,9 @@ class PreProcessor(torch_geometric.data.InMemoryDataset):
         # per-graph outputs consistent across the dataset (for example, the
         # feature width of ranks that are empty in some graphs).
         for wrapped in getattr(self.pre_transform, "transforms", []):
-            finalize = getattr(wrapped.transform, "finalize_dataset", None)
+            finalize = getattr(
+                getattr(wrapped, "transform", None), "finalize_dataset", None
+            )
             if finalize is not None:
                 self.data_list = finalize(self.data_list)
 

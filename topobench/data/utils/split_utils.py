@@ -599,7 +599,7 @@ def load_inductive_splits(dataset, parameters):
 
     else:
         raise NotImplementedError(
-            f"split_type {parameters.split_type} not valid. Choose either 'random', 'k-fold' or 'fixed'.\
+            f"split_type {parameters.split_type} not valid. Choose one of 'random', 'stratified', 'k-fold', 'fixed', 'k-fold-fixed', 'seeded_stratified' or 'imported'.\
             If 'fixed' is chosen, the dataset should have the attribute split_idx"
         )
 

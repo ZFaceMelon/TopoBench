@@ -4,6 +4,7 @@ import copy
 from pathlib import Path
 
 import numpy as np
+import pytest
 import torch
 from torch import nn
 
@@ -86,6 +87,20 @@ def test_sisa_wide_decay_matches_and_stays_finite():
     output = layer(x)
     output.sum().backward()
     assert torch.isfinite(output).all() and torch.isfinite(x.grad).all()
+
+
+@pytest.mark.parametrize("decay_bias", [-5.0, 0.0, 0.5, 2.0])
+def test_sisa_float16_attention_stays_finite(decay_bias):
+    """Learned decays that overflow float16 use the explicit path."""
+    torch.manual_seed(0)
+    layer = SISALayer(32, n_heads=4, d_ssm=4, attention_dropout=0.0).eval()
+    nn.init.constant_(layer.alpha_proj.bias, decay_bias)
+    x = torch.randn(4, 32, 32)
+    with torch.no_grad():
+        expected = layer(x)
+        actual = layer.half()(x.half()).float()
+    assert torch.isfinite(actual).all()
+    torch.testing.assert_close(actual, expected, atol=2e-2, rtol=2e-2)
 
 
 def test_sequence_cumsum_matches_cumsum():

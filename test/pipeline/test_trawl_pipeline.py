@@ -304,7 +304,10 @@ def test_native_runner(
         cfg.train = False
         cfg.ckpt_path = str(relocated / source.name)
         cfg.paths.output_dir = str(tmp_path / "replay")
+        # A supplied checkpoint is evaluated but never deleted.
+        cfg.delete_checkpoint_after_test = True
         replay_metrics, _ = run(cfg)
+        assert Path(cfg.ckpt_path).is_file()
         assert float(replay_metrics["test_best_rerun/loss"]) == pytest.approx(
             float(metrics["test_best_rerun/loss"]), abs=1e-6
         )

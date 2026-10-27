@@ -8,3 +8,8 @@ model_domain: graph
 backbone:
   max_rank: 0
   num_neighborhoods: 1
+backbone_wrapper:
+  walks:
+    guidance:
+      # Node-level graphs usually exceed the dense heat-guidance limit.
+      gamma: 0.0

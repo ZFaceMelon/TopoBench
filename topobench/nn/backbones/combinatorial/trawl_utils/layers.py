@@ -362,6 +362,33 @@ def sequence_cumsum(x: torch.Tensor, dim: int) -> torch.Tensor:
     return moved.movedim(-1, dim).to(x.dtype)
 
 
+def attention_dtype(x: torch.Tensor) -> torch.dtype:
+    """Return the dtype in which attention kernels will process ``x``.
+
+    Under autocast, ``scaled_dot_product_attention`` casts its inputs to the
+    autocast dtype; otherwise it keeps the dtype of ``x``.
+
+    Parameters
+    ----------
+    x : torch.Tensor
+        Attention input.
+
+    Returns
+    -------
+    torch.dtype
+        Effective attention dtype.
+    """
+    device_type = x.device.type
+    if hasattr(torch, "get_autocast_dtype"):  # torch >= 2.4
+        if torch.is_autocast_enabled(device_type):
+            return torch.get_autocast_dtype(device_type)
+    elif device_type == "cuda" and torch.is_autocast_enabled():
+        return torch.get_autocast_gpu_dtype()
+    elif device_type == "cpu" and torch.is_autocast_cpu_enabled():
+        return torch.get_autocast_cpu_dtype()
+    return x.dtype
+
+
 def build_rope_cache(seq_len: int, dim: int, device, dtype):
     """Build rotary position embedding cosine and sine tables.
 
@@ -470,6 +497,9 @@ class SISALayer(nn.Module):
     # Beyond this cumulative log-decay span the centered factors exp(+-span/2)
     # and masked products exp(span) leave the safe fp32/bf16 range.
     MAX_FACTORED_SPAN = 60.0
+    # fp16 overflows above 65504 (about exp(11)), so float16 attention needs
+    # a much smaller span before heads switch to the explicit path.
+    MAX_FACTORED_SPAN_FP16 = 8.0
 
     def _explicit_attention(self, q, k, v, c_ssm, b_ssm, g, scale, dh):
         """Causal attention with the decay formed only for ``j <= i``.
@@ -547,7 +577,12 @@ class SISALayer(nn.Module):
         # whole. Wide heads use the explicit path; the factored path sees a
         # neutral decay there so neither branch (nor its gradient) overflows.
         span = g.amax(dim=2, keepdim=True) - g.amin(dim=2, keepdim=True)
-        wide = span.detach() > self.MAX_FACTORED_SPAN
+        limit = (
+            self.MAX_FACTORED_SPAN_FP16
+            if attention_dtype(q) == torch.float16
+            else self.MAX_FACTORED_SPAN
+        )
+        wide = span.detach() > limit
         explicit = self._explicit_attention(
             q, k, v, c_ssm, b_ssm, g, scale, dh
         )

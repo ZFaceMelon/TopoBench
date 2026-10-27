@@ -72,8 +72,14 @@ def test_eval_views_add_walks():
     assert set(out["walk_view"].tolist()) == {0, 1, 2}
 
 
-def test_neighborhood_mismatch_is_reported():
+def test_rank_and_neighborhood_mismatches_are_reported():
     graph = prepare()
+    with pytest.raises(ValueError, match="max_rank=2"):
+        network([prepare(max_rank=1)], max_rank=2)
+    net = network([graph], max_rank=2)
+    lower = prepare(max_rank=1)
+    with pytest.raises(ValueError, match="max_rank=2"):
+        net(collate([lower, lower]))
     with pytest.raises(ValueError, match="neighborhood counts"):
         network([graph], num_neighborhoods=3)(collate([graph]))
 

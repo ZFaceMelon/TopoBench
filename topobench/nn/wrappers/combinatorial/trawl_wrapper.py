@@ -106,6 +106,7 @@ class TRAWLWrapper(AbstractWrapper):
             raise ValueError(
                 "Cannot infer TRAWL input widths from an empty dataset"
             )
+        self._check_ranks(data_list[0].trawl_counts.shape[-1])
         signal_widths = []
         for rank in range(self.backbone.max_rank + 1):
             key = f"trawl_signal_{rank}"
@@ -120,6 +121,20 @@ class TRAWLWrapper(AbstractWrapper):
                 next(iter(widths), data_list[0][key].shape[1])
             )
         self.backbone.initialize(signal_widths, data_list[0].trawl_pe.shape[1])
+
+    def _check_ranks(self, num_ranks):
+        """Check that the transform built the ranks the backbone expects.
+
+        Parameters
+        ----------
+        num_ranks : int
+            Number of ranks built by ``TRAWLTransform``.
+        """
+        if num_ranks != self.backbone.max_rank + 1:
+            raise ValueError(
+                f"Transform built ranks 0..{num_ranks - 1}, but the backbone "
+                f"expects max_rank={self.backbone.max_rank}"
+            )
 
     def compilable_layers(self):
         """Return the backbone layers that ``torch.compile`` may compile.
@@ -204,7 +219,9 @@ class TRAWLWrapper(AbstractWrapper):
         backbone = self.backbone
         max_rank = backbone.max_rank
         host = self._host(batch)
-        counts = host["trawl_counts"].reshape(-1, max_rank + 1)
+        num_graphs = len(host["trawl_relations"])
+        counts = host["trawl_counts"].reshape(num_graphs, -1)
+        self._check_ranks(counts.shape[1])
         edge_slices = getattr(batch, "_slice_dict", {}).get("trawl_edges")
         node_offsets = np.zeros(max_rank + 1, dtype=int)
         state_offset = 0

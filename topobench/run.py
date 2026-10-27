@@ -366,7 +366,10 @@ def rerun_best_model_checkpoint(
     strategy = selection.get("strategy", "best")
     if strategy not in {"best", "weight_average", "logit_ensemble"}:
         raise ValueError(f"Unknown checkpoint selection strategy: {strategy}")
-    if not cfg.get("train", True) and cfg.get("ckpt_path"):
+    # Evaluating a user-supplied checkpoint (``train=false ckpt_path=...``):
+    # that file is never deleted by ``delete_checkpoint_after_test``.
+    external_checkpoint = not cfg.get("train", True) and cfg.get("ckpt_path")
+    if external_checkpoint:
         model_path = Path(cfg.ckpt_path)
         if strategy == "best":
             state = torch.load(
@@ -511,7 +514,9 @@ def rerun_best_model_checkpoint(
         destination = Path(cfg.paths.output_dir) / "evaluation_report.json"
         destination.parent.mkdir(parents=True, exist_ok=True)
         destination.write_text(json.dumps(report, indent=2) + "\n")
-    if (
+    if external_checkpoint and cfg.get("delete_checkpoint_after_test", False):
+        log.info(f"Keeping the supplied checkpoint {model_path}")
+    elif (
         cfg.get("delete_checkpoint_after_test", False)
         and model_path
         and model_path.exists()
