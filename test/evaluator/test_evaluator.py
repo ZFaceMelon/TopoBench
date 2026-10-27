@@ -363,3 +363,32 @@ class TestTBEvaluatorMultioutput:
         ev.update({"logits": logits, "labels": labels})
         out = ev.compute()
         assert "accuracy-0" in out
+
+
+def test_one_logit_auroc_is_batch_invariant():
+    """One-logit binary outputs are scored as two-class probabilities."""
+    from sklearn.metrics import roc_auc_score
+
+    generator = torch.Generator().manual_seed(0)
+    labels = torch.randint(0, 2, (278,), generator=generator)
+    logits = (labels - 0.5) * 0.8 + torch.randn(278, generator=generator)
+    results = []
+    for size in (2, 278):
+        evaluator = TBEvaluator(
+            "classification", num_classes=2, metrics=["accuracy", "auroc"]
+        )
+        for start in range(0, len(labels), size):
+            stop = start + size
+            evaluator.update(
+                {
+                    "logits": logits[start:stop, None],
+                    "labels": labels[start:stop],
+                }
+            )
+        results.append(evaluator.compute())
+    expected = roc_auc_score(labels.numpy(), logits.numpy())
+    for result in results:
+        assert result["auroc"].item() == pytest.approx(expected, abs=1e-6)
+        assert result["accuracy"].item() == pytest.approx(
+            ((logits > 0).long() == labels).float().mean().item()
+        )

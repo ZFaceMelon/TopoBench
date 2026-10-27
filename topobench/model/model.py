@@ -11,10 +11,12 @@ from torchmetrics import MeanMetric
 class HostBatchTransferMixin:
     """Move batches to the device without making the host wait.
 
-    Backbones listing ``host_fields`` receive CPU copies of those fields as
-    ``batch.trawl_host`` (read before the transfer), so host-side work such as
-    walk sampling never synchronizes with the device. Batch tensors are copied
-    with ``non_blocking``, which overlaps with compute for pinned memory.
+    A backbone (or backbone wrapper) may declare a ``host_fields`` tuple of
+    batch keys it reads on the host. CPU copies of those fields, taken before
+    the transfer, are attached as ``batch.host_copies`` so host-side work such
+    as walk sampling never synchronizes with the device. Batch tensors are
+    copied with ``non_blocking``, which overlaps with compute for pinned
+    memory.
     """
 
     def on_before_batch_transfer(self, batch, dataloader_idx):
@@ -30,12 +32,12 @@ class HostBatchTransferMixin:
         Returns
         -------
         Any
-            The batch, with ``trawl_host`` set for ``Data`` batches.
+            The batch, with ``host_copies`` set for ``Data`` batches.
         """
         backbone = getattr(self, "backbone", None)
         fields = getattr(backbone, "host_fields", ())
         if fields and isinstance(batch, Data):
-            batch.trawl_host = {
+            batch.host_copies = {
                 key: batch[key].numpy() for key in fields if key in batch
             }
         return batch
@@ -427,16 +429,23 @@ class TBModel(HostBatchTransferMixin, LightningModule):
             self.configure_compilation()
 
     def configure_compilation(self):
-        """Compile in place, preserving checkpoint keys and CPU walk sampling."""
+        """Compile in place when ``compile`` is set, preserving checkpoint keys.
+
+        ``compile_scope="backbone"`` (default) compiles the whole backbone.
+        ``compile_scope="layers"`` compiles only the modules returned by the
+        backbone's ``compilable_layers()``, leaving host-side code such as
+        walk sampling uncompiled.
+        """
         if not self.hparams.get("compile", False):
             return
         scope = self.hparams.get("compile_scope", "backbone")
         if scope == "layers":
-            if not hasattr(self.backbone, "encoders"):
-                raise ValueError("Layer compilation requires encoder stacks")
-            modules = [
-                layer for stack in self.backbone.encoders for layer in stack
-            ]
+            if not hasattr(self.backbone, "compilable_layers"):
+                raise ValueError(
+                    "compile_scope=layers requires a backbone that defines "
+                    "compilable_layers()"
+                )
+            modules = list(self.backbone.compilable_layers())
         elif scope == "backbone":
             modules = [self.backbone]
         else:

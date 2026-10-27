@@ -138,13 +138,14 @@ DDP_STRATEGIES = {"ddp", "ddp_spawn", "ddp_fork", "ddp_notebook"}
 
 
 def enable_unused_parameter_detection(cfg: DictConfig) -> None:
-    """Let TRAWL train under Lightning DDP string strategies.
+    """Select DDP's unused-parameter detection for models that request it.
 
-    Which TRAWL parameters receive gradients depends on the configuration
-    and data (pretraining decoders, fusion for union walks, absent ranks).
-    Plain DDP aborts on such parameters, so TRAWL runs select Lightning's
-    registered ``*_find_unused_parameters_true`` variant instead. Spawned
-    runs on Linux also share tensors through the file system.
+    Models whose parameters may receive no gradient in a step (for example
+    because it depends on the configuration or on the data) set
+    ``model.ddp_find_unused_parameters: true``. Plain DDP aborts on such
+    parameters, so their runs use Lightning's registered
+    ``*_find_unused_parameters_true`` strategy variant instead. Spawned runs
+    on Linux then also share tensors through the file system.
 
     Parameters
     ----------
@@ -152,7 +153,9 @@ def enable_unused_parameter_detection(cfg: DictConfig) -> None:
         Run configuration; ``cfg.trainer.strategy`` is updated in place.
     """
     strategy = cfg.trainer.get("strategy")
-    if cfg.model.get("model_name") != "trawl" or not isinstance(strategy, str):
+    if not cfg.model.get("ddp_find_unused_parameters", False) or not (
+        isinstance(strategy, str)
+    ):
         return
     if strategy.startswith("ddp_spawn") and sys.platform.startswith("linux"):
         # Spawned workers receive the datasets through shared memory. The
@@ -162,7 +165,7 @@ def enable_unused_parameter_detection(cfg: DictConfig) -> None:
     if strategy not in DDP_STRATEGIES:
         return
     replacement = f"{strategy}_find_unused_parameters_true"
-    log.info(f"TRAWL uses trainer.strategy={replacement} under DDP")
+    log.info(f"Using trainer.strategy={replacement} for this model")
     with open_dict(cfg):
         cfg.trainer.strategy = replacement
 
@@ -236,22 +239,23 @@ def run(cfg: DictConfig) -> tuple[dict[str, Any], dict[str, Any]]:
         loss=cfg.loss,
     )
 
+    # Backbones (or wrappers) with lazily sized inputs infer them from the
+    # transformed training data before the optimizer is built.
     if hasattr(model.backbone, "initialize"):
         model.backbone.initialize(dataset_train.data_lst)
 
     model.configure_compilation()
 
-    if cfg.get("pretraining", {}).get("enabled", False) and cfg.get("train"):
+    # Optional pretraining procedure selected by the ``pretraining`` group.
+    if cfg.get("pretraining") is not None and cfg.get("train"):
         if cfg.get("ckpt_path"):
             log.info("Resuming supervised checkpoint; skipping pretraining.")
         else:
-            from topobench.model.trawl_pretraining import run_pretraining
-
-            run_pretraining(
-                model,
-                datamodule,
-                cfg.pretraining,
-                cfg.trainer,
+            log.info(f"Pretraining with <{cfg.pretraining._target_}>")
+            hydra.utils.instantiate(cfg.pretraining)(
+                model=model,
+                datamodule=datamodule,
+                trainer_config=cfg.trainer,
                 output_dir=cfg.paths.output_dir,
             )
 
@@ -358,9 +362,12 @@ def rerun_best_model_checkpoint(
     final_metrics = {}
     selected_checkpoints = []
     model_path = None
+    selection = cfg.get("checkpoint_selection") or {}
+    strategy = selection.get("strategy", "best")
+    if strategy not in {"best", "weight_average", "logit_ensemble"}:
+        raise ValueError(f"Unknown checkpoint selection strategy: {strategy}")
     if not cfg.get("train", True) and cfg.get("ckpt_path"):
         model_path = Path(cfg.ckpt_path)
-        strategy = cfg.get("evaluation", {}).get("checkpoint", "best")
         if strategy == "best":
             state = torch.load(
                 model_path, map_location="cpu", weights_only=False
@@ -398,10 +405,6 @@ def rerun_best_model_checkpoint(
                 callback.restore_ranking()
             if not callback.best_model_path:
                 continue
-            evaluation = cfg.get("evaluation", {})
-            strategy = evaluation.get("checkpoint", "best")
-            if strategy not in {"best", "weight_average", "logit_ensemble"}:
-                raise ValueError(f"Unknown checkpoint strategy: {strategy}")
             if strategy != "best":
                 from topobench.evaluator.checkpoint import (
                     PassThroughReadout,
@@ -409,7 +412,7 @@ def rerun_best_model_checkpoint(
                     average_checkpoints,
                 )
 
-                k = int(evaluation.get("top_k", 5))
+                k = int(selection.get("top_k", 5))
                 ranked = sorted(
                     callback.best_k_models,
                     key=lambda path: float(callback.best_k_models[path]),
@@ -462,14 +465,6 @@ def rerun_best_model_checkpoint(
             checkpoint_model.to(device)
             break  # there is only one checkpoint callback
 
-    walk_views = cfg.get("evaluation", {}).get("walk_views")
-    if walk_views is not None:
-        if int(walk_views) < 1:
-            raise ValueError("evaluation.walk_views must be positive")
-        for module in checkpoint_model.modules():
-            if hasattr(module, "eval_views"):
-                module.eval_views = int(walk_views)
-
     # New trainer to log final metrics on validation set
     # Because wandb displays validation metrics from the final, not the best epoch.
     checkpoint_trainer: Trainer = hydra.utils.instantiate(
@@ -506,17 +501,14 @@ def rerun_best_model_checkpoint(
         log.info(logged)
         final_metrics.update(logged)
         log_late_metrics(logger, logged)
-    if cfg.model.get("model_name") == "trawl" and rank_zero_only.rank == 0:
+    if selection.get("report", False) and rank_zero_only.rank == 0:
         report = {
-            "checkpoint_strategy": cfg.get("evaluation", {}).get(
-                "checkpoint", "best"
-            ),
+            "checkpoint_strategy": strategy,
             "selected_checkpoints": selected_checkpoints,
             "checkpoint_count": len(selected_checkpoints),
-            "walk_views": walk_views,
             "metrics": final_metrics,
         }
-        destination = Path(cfg.paths.output_dir) / "trawl_evaluation.json"
+        destination = Path(cfg.paths.output_dir) / "evaluation_report.json"
         destination.parent.mkdir(parents=True, exist_ok=True)
         destination.write_text(json.dumps(report, indent=2) + "\n")
     if (

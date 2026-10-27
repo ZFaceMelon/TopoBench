@@ -1,16 +1,26 @@
 _target_: topobench.model.TBModel
+
 model_name: trawl
 model_domain: combinatorial
-compile: false
-compile_scope: layers
+
+# Whether a TRAWL parameter receives a gradient depends on the configuration
+# and data (e.g. fusion with union walks, absent ranks), so DDP strategies
+# switch to unused-parameter detection.
+ddp_find_unused_parameters: true
+# false runs validation and test without autocast when training under AMP.
+evaluation_autocast: true
+
+# TRAWL projects the raw cell features itself; to use a native rank
+# encoder, wrap it in topobench.nn.encoders.trawl.TRAWLFeatureEncoder.
 feature_encoder: null
+
 backbone:
-  _target_: topobench.nn.backbones.combinatorial.trawl.TRAWL
+  _target_: topobench.nn.backbones.combinatorial.TRAWL
   _recursive_: false
   hidden_dim: 128
   max_rank: 2
-  in_channels: null
-  pe_dim: null
+  in_channels: null # inferred from the transformed training data
+  pe_dim: null # inferred from the transformed training data
   architecture: hybrid
   depth: 5
   layers: null
@@ -28,7 +38,7 @@ backbone:
       dropout: 0.3
       expansion: 2
   walk_scope: union
-  num_neighborhoods: 2
+  num_neighborhoods: 2 # must match the relations built by transforms.trawl
   encoder_sharing: shared
   fusion: mean
   pooling: mean_max
@@ -36,12 +46,18 @@ backbone:
   num_colors: 0
   move_embedding: true
   dropout: 0.0
-  seed: ${seed}
-  eval_views: 1
   checkpoint_layers: false
-  walk_refresh: train
   occurrence_pooling: mean
   graph_readout: walks
+
+backbone_wrapper:
+  _target_: topobench.nn.wrappers.${model.backbone_wrapper.wrapper_name}
+  _partial_: true
+  wrapper_name: TRAWLWrapper
+  out_channels: ${model.backbone.hidden_dim}
+  seed: ${seed}
+  eval_views: 1
+  walk_refresh: train
   transition_cache_size: 1024
   walks:
     k: 32
@@ -53,8 +69,10 @@ backbone:
       gamma: 0.2
       diffusion_t: 0.1
       dense_limit: 2048
+
 readout:
-  _target_: topobench.nn.backbones.combinatorial.trawl.TRAWLReadout
+  _target_: topobench.nn.readouts.${model.readout.readout_name}
+  readout_name: TRAWLReadout
   hidden_dim: ${model.backbone.hidden_dim}
   graph_dim: ${trawl_output_dim:${model.backbone.hidden_dim},${model.backbone.pooling}}
   out_channels: ${dataset.parameters.num_classes}
@@ -62,3 +80,8 @@ readout:
   head_hidden: ${model.backbone.hidden_dim}
   dropout: 0.5
   aggregation: embedding
+
+# compile model for faster training with pytorch 2.0
+compile: false
+# "layers" compiles only the sequence layers, keeping walk sampling eager.
+compile_scope: layers

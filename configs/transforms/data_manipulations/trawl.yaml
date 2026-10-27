@@ -3,9 +3,11 @@ schema_version: 2
 transform_type: data_manipulation
 max_rank: ${model.backbone.max_rank}
 graph: augmented_hasse
-neighborhoods: [up_incidence-0, up_incidence-1]
+# null: up_incidence-r for every r < max_rank (up_adjacency-0 when max_rank
+# is 0). The count must match model.backbone.num_neighborhoods.
+neighborhoods: null
 bidirectional: true
-overlap_ranks: [1, 2]
+overlap_ranks: null # null: ranks 1..max_rank
 encoding_scope: separate
 color_key: null
 color_refinement: false

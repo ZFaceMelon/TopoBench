@@ -50,8 +50,7 @@ class BackboneExportsManager:
             if file_path.stem == "__init__":
                 continue
 
-            # Import under the package name so classes keep their identity,
-            # and export only a module's ``__all__`` when it declares one.
+            # Import under the package name so classes keep their identity.
             module = import_module(f"{__name__}.{file_path.stem}")
             new_backbones = {
                 name: obj
@@ -59,7 +58,6 @@ class BackboneExportsManager:
                 if inspect.isclass(obj)
                 and obj.__module__ == module.__name__
                 and not name.startswith("_")
-                and name in getattr(module, "__all__", [name])
             }
             backbones.update(new_backbones)
         return backbones

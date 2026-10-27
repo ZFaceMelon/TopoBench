@@ -1,7 +1,0 @@
-# @package _global_
-defaults:
-  - /experiment/trawl/nci1_hybrid
-
-model:
-  backbone:
-    architecture: sisa

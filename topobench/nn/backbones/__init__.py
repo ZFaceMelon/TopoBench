@@ -62,7 +62,6 @@ class ModelExportsManager:
                         if inspect.isclass(obj)
                         and obj.__module__ == module.__name__
                         and not name.startswith("_")
-                        and name in getattr(module, "__all__", [name])
                     }
                     models.update(new_models)
         return models
