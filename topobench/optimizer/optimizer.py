@@ -22,10 +22,18 @@ class TBOptimizer(AbstractOptimizer):
         Parameters to be passed to the optimizer.
     scheduler : dict, optional
         Scheduler id and parameters to be used. Default is None.
+    no_decay : list of str, optional
+        Regular expressions over parameter names (``backbone.``,
+        ``readout.`` or ``feature_encoder.`` prefixed); matching parameters
+        form a second group with ``weight_decay=0``. None keeps a single
+        group, as before. Default is None.
     """
 
-    def __init__(self, optimizer_id, parameters, scheduler=None) -> None:
+    def __init__(
+        self, optimizer_id, parameters, scheduler=None, no_decay=None
+    ) -> None:
         optimizer_id = optimizer_id
+        self.no_decay = list(no_decay) if no_decay else None
         self.optimizer = functools.partial(
             TORCH_OPTIMIZERS[optimizer_id], **parameters
         )

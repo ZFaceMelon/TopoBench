@@ -1,0 +1,21 @@
+# @package _global_
+# G1: learnable global gate over three walk families, on top of V1 settings
+# (id cap 64, vertex_features): 2-cells across shared edges (edge-walk
+# fallback), atoms over bonds (up_adjacency-0), and rank-switching Hasse walks
+# over vertices, edges and cells (up_incidence-0+up_incidence-1). Families are
+# encoded separately and their pooled graph embeddings are mixed by a softmax
+# over one learnable logit per family (fusion: learned); the mean weights are
+# logged as val/gate_w{0,1,2} and test/gate_w{0,1,2} in family order.
+defaults:
+  - /experiment/trawl/graph_u8_lin_vf@_here_
+
+transforms:
+  trawl:
+    neighborhoods:
+      [down_adjacency-2, down_adjacency-1, up_adjacency-0, up_incidence-0+up_incidence-1]
+model:
+  backbone:
+    num_neighborhoods: 4
+    fallback_family: 1
+    fusion: learned
+tags: [trawl, graph, gate, global]

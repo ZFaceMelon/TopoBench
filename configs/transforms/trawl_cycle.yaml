@@ -1,0 +1,8 @@
+# Graph datasets for TRAWL with exactly the lifting HOPSE-M-C uses:
+# graph2cell/cycle (CellCycleLifting, complex_dim 2, max_cell_length 10,
+# ProjectionSum), then TRAWLTransform. The identity data manipulation is a
+# no-op kept to mirror model_dataset_defaults/hopse_m_PROTEINS.
+defaults:
+  - /transforms/data_manipulations@data_manipulations: identity
+  - /transforms/liftings/graph2cell@lifting: cycle
+  - /transforms/data_manipulations@trawl: trawl

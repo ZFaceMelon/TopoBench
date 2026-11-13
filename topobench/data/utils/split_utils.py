@@ -110,7 +110,14 @@ def seeded_stratified_split(labels, parameters):
     dict
         Dictionary containing the train, validation and test indices, with keys "train", "valid", and "test".
     """
-    labels = np.asarray(labels).reshape(-1)
+    labels = np.asarray(labels)
+    rows = labels.reshape(len(labels), -1) if labels.ndim > 1 else None
+    if rows is not None and rows.shape[1] > 1:
+        # Multi-output labels (e.g. Betti numbers): stratify on the joint
+        # label tuple of each graph.
+        labels = np.unique(rows, axis=0, return_inverse=True)[1].reshape(-1)
+    else:
+        labels = labels.reshape(-1)
     indices = np.arange(len(labels))
     train, heldout = train_test_split(
         indices,

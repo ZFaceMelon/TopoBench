@@ -1,0 +1,11 @@
+# @package _global_
+# u2 with a linear readout head (no hidden MLP layer). The LoopBound agent
+# found TRAWL's default MLP head (head_hidden=128) was the main blocker on a
+# parity task; this tests whether it also slows u2 on unsigned ORIENT.
+defaults:
+  - /experiment/trawl/unsigned_u2@_here_
+
+model:
+  readout:
+    head_hidden: null
+tags: [trawl, unsigned, u2_lin]

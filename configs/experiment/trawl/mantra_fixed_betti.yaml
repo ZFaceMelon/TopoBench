@@ -1,0 +1,24 @@
+# @package _global_
+# trawl/mantra_fixed for the Betti-number task (dataset=simplicial/mantra_betti_numbers).
+# Only the loss/selection shape differs: TopoBench defines Betti numbers as a
+# three-output regression (MSE; predictions rounded and clamped per output;
+# macro F1 per output, f1-1 = beta1, f1-2 = beta2) selected on validation
+# loss. Class weights do not apply to MSE. Walks and architecture are
+# identical to the other tasks.
+defaults:
+  - /experiment/trawl/mantra_fixed@_here_
+
+loss:
+  dataset_loss:
+    class_weights: null
+optimizer:
+  scheduler:
+    monitor: val/loss
+    scheduler_params:
+      mode: min
+evaluator:
+  # TopoBench's default multi-output metric list, written out (f1-1 = beta1,
+  # f1-2 = beta2; macro F1 over each output's classes).
+  metrics: [accuracy-0, precision-0, recall-0, f1-0, accuracy-1, precision-1,
+    recall-1, f1-1, accuracy-2, precision-2, recall-2, f1-2]
+tags: [trawl, mantra, fixed, betti]

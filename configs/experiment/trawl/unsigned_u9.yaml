@@ -1,0 +1,10 @@
+# @package _global_
+# u9 = u8 (u2 + back-pointers) with the precomputed encodings left out of the
+# walk tokens: pure-walk model with explicit loop lookup.
+defaults:
+  - /experiment/trawl/unsigned_u8@_here_
+
+model:
+  backbone:
+    use_pe: false
+tags: [trawl, unsigned, u9]

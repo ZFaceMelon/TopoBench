@@ -1,0 +1,14 @@
+# @package _global_
+# S1: soft per-graph gate over 2-cells / atoms / Hasse (G2) with no weight
+# decay on the gate MLP output layer, an entropy bonus (0.01 x mean per-graph
+# gate entropy) and family dropout (p=0.2 per family and graph in training).
+defaults:
+  - /experiment/trawl/graph_gate_g2@_here_
+
+model:
+  backbone:
+    gate_entropy: 0.01
+    family_dropout: 0.2
+optimizer:
+  no_decay: [fusion.gate.2.weight, fusion.gate.2.bias]
+tags: [trawl, graph, gate, per_graph, soft]

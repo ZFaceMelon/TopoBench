@@ -239,6 +239,16 @@ def run(cfg: DictConfig) -> tuple[dict[str, Any], dict[str, Any]]:
     if hasattr(model.backbone, "initialize"):
         model.backbone.initialize(dataset_train.data_lst)
 
+    for loss in getattr(getattr(model, "loss", None), "losses", []):
+        if getattr(loss, "needs_class_weights", False):
+            loss.set_class_weights_from(
+                torch.cat(
+                    [data.y.reshape(-1) for data in dataset_train.data_lst]
+                ),
+                cfg.dataset.parameters.get("num_classes"),
+            )
+            log.info(f"Balanced class weights: {loss.class_weights.tolist()}")
+
     model.configure_compilation()
 
     if cfg.get("pretraining", {}).get("enabled", False) and cfg.get("train"):

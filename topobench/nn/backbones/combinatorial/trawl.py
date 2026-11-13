@@ -6,6 +6,7 @@ transformer, GRU, MLP or any Hydra-instantiated module).
 """
 
 import copy
+import functools
 import hashlib
 import json
 import math
@@ -19,6 +20,7 @@ import scipy.sparse as sp
 import torch
 from torch import nn
 from torch.nn import functional as F
+from torch_geometric.utils import scatter
 
 try:
     from numba import njit
@@ -1313,6 +1315,36 @@ def upload(array, device):
     return tensor.pin_memory().to(device, non_blocking=True)
 
 
+class SafeBatchNorm1d(nn.BatchNorm1d):
+    """Batch norm that uses running statistics for single-row batches."""
+
+    def forward(self, x):
+        """Normalize ``x``; a one-row training batch uses running stats.
+
+        Parameters
+        ----------
+        x : torch.Tensor
+            Input of shape ``[rows, features]``.
+
+        Returns
+        -------
+        torch.Tensor
+            Normalized input.
+        """
+        if self.training and len(x) < 2:
+            return nn.functional.batch_norm(
+                x,
+                self.running_mean,
+                self.running_var,
+                self.weight,
+                self.bias,
+                False,
+                0.0,
+                self.eps,
+            )
+        return super().forward(x)
+
+
 class NeighborhoodFusion(nn.Module):
     """Fuse available neighborhood embeddings, preserving empty-slot semantics.
 
@@ -1323,13 +1355,18 @@ class NeighborhoodFusion(nn.Module):
     count : int
         Number of neighborhoods.
     mode : str, optional
-        Fusion mode: ``"mean"``, ``"concat"``, ``"learned"`` or
-        ``"attention"`` (default: "mean").
+        Fusion mode: ``"mean"``, ``"concat"``, ``"learned"`` (a global
+        learnable logit per neighborhood, softmax over available ones),
+        ``"attention"`` (a score per neighborhood embedding) or
+        ``"gate_mlp"`` (per-graph softmax gate from a small MLP on the
+        concatenated, availability-masked embeddings) (default: "mean").
     """
+
+    GATED = ("learned", "attention", "gate_mlp")
 
     def __init__(self, dim, count, mode="mean"):
         super().__init__()
-        if mode not in {"mean", "concat", "learned", "attention"}:
+        if mode not in {"mean", "concat", "learned", "attention", "gate_mlp"}:
             raise ValueError(f"Unknown neighborhood fusion {mode}")
         self.mode = mode
         self.weights = (
@@ -1339,8 +1376,14 @@ class NeighborhoodFusion(nn.Module):
         self.project = (
             nn.Linear(count * (dim + 1), dim) if mode == "concat" else None
         )
+        if mode == "gate_mlp":
+            self.gate = nn.Sequential(
+                nn.Linear(count * (dim + 1), dim),
+                nn.GELU(),
+                nn.Linear(dim, count),
+            )
 
-    def forward(self, values, available, fallback):
+    def forward(self, values, available, fallback, return_weights=False):
         """Fuse neighborhood embeddings, ignoring unavailable slots.
 
         Parameters
@@ -1352,27 +1395,216 @@ class NeighborhoodFusion(nn.Module):
         fallback : torch.Tensor
             Embedding of shape ``[dim]`` returned when none is available.
 
+        return_weights : bool, optional
+            Also return the softmax weights over neighborhoods (zeros if
+            none is available, None for ``"concat"``) (default: False).
+
         Returns
         -------
         torch.Tensor
-            Fused embedding of shape ``[dim]``.
+            Fused embedding of shape ``[dim]`` (and the weights).
         """
         if not bool(available.any()):
-            return fallback
+            return (
+                (fallback, values.new_zeros(len(values)))
+                if return_weights
+                else fallback
+            )
         if self.mode == "concat":
             slots = torch.cat(
                 (values * available[:, None], available[:, None].to(values)),
                 dim=1,
             )
-            return self.project(slots.flatten())
+            fused = self.project(slots.flatten())
+            return (fused, None) if return_weights else fused
         if self.mode == "mean":
             scores = values.new_zeros(len(values))
         elif self.mode == "learned":
             scores = self.weights
+        elif self.mode == "gate_mlp":
+            slots = torch.cat(
+                (values * available[:, None], available[:, None].to(values)),
+                dim=1,
+            )
+            scores = self.gate(slots.flatten())
         else:
             scores = self.attention(values).squeeze(-1)
         weights = scores.masked_fill(~available, -torch.inf).softmax(dim=0)
-        return (values * weights[:, None]).sum(dim=0)
+        fused = (values * weights[:, None]).sum(dim=0)
+        return (fused, weights) if return_weights else fused
+
+
+# ---------------------------------------------------------------------------
+# Host walk sampling, optionally in a process pool
+# ---------------------------------------------------------------------------
+
+_WORKER_SAMPLER = None
+_POOLS = {}
+
+
+def _init_sampling_worker(cache_size):
+    """Give a sampling worker its own transition cache.
+
+    Parameters
+    ----------
+    cache_size : int
+        Transition distributions cached per worker.
+    """
+    global _WORKER_SAMPLER
+    _WORKER_SAMPLER = WalkSampler(cache_size)
+    torch.set_num_threads(1)
+
+
+def _sampling_pool(workers, cache_size):
+    """Return a persistent fork pool of sampling workers.
+
+    Parameters
+    ----------
+    workers : int
+        Number of processes.
+    cache_size : int
+        Transition cache size per worker.
+
+    Returns
+    -------
+    multiprocessing.pool.Pool
+        The pool (created on first use).
+    """
+    key = (int(workers), int(cache_size))
+    if key not in _POOLS:
+        import multiprocessing as mp
+
+        _POOLS[key] = mp.get_context("fork").Pool(
+            workers,
+            initializer=_init_sampling_worker,
+            initargs=(cache_size,),
+        )
+    return _POOLS[key]
+
+
+def _sample_graph(spec, item, sampler=None):
+    """Sample every family and view of one graph (host side, numpy only).
+
+    Each graph is seeded independently (``walk_seed`` of the model seed,
+    graph identity, sampling step, family and view), so sampling graphs in
+    worker processes gives exactly the walks of the serial loop.
+
+    Parameters
+    ----------
+    spec : dict
+        Sampling options of the backbone for this batch.
+    item : tuple
+        ``(graph_id, total, first, identity, edges, weights, signs, pivots,
+        cell_vertices, count_row)`` with graph-local indices.
+    sampler : WalkSampler, optional
+        Sampler with its transition cache; the worker's own if None
+        (default: None).
+
+    Returns
+    -------
+    list
+        Per family, ten lists of arrays in the slot order of ``sampled``
+        (paths, owners, views, sign codes, running codes, pivots, vertex
+        ids, crossed, pointers, vertex states); paths, pivots and vertex
+        states are graph-local (-1 for none).
+    """
+    sampler = sampler if sampler is not None else _WORKER_SAMPLER
+    (
+        graph_id,
+        total,
+        first,
+        identity,
+        edges,
+        weights,
+        edge_signs,
+        edge_pivots,
+        cell_vertices,
+        count_row,
+    ) = item
+    groups, views = spec["groups"], spec["views"]
+    out = [[[] for _ in range(10)] for _ in groups]
+    use_pivots, use_signs = spec["use_pivots"], spec["use_signs"]
+    if use_pivots:
+        pivot_table = np.full((total, total), -1, dtype=np.int64)
+        pivot_table[edges[:, 0], edges[:, 1]] = edge_pivots
+    if use_signs:
+        # Code per ordered state pair: 0 none, 1 for +1, 2 for -1.
+        sign_table = np.zeros((total, total), dtype=np.int64)
+        sign_table[edges[:, 0], edges[:, 1]] = np.where(
+            edge_signs > 0, 1, np.where(edge_signs < 0, 2, 0)
+        )
+    for group_id, relation in enumerate(groups):
+        select = (
+            np.ones(len(edges), dtype=bool)
+            if relation is None
+            else edges[:, 2] == relation
+        )
+        if spec["fallback_family"] is not None and not select.any():
+            select = edges[:, 2] == spec["fallback_family"]
+        chosen = edges[select]
+        matrix = sp.csr_matrix(
+            (weights[select], (chosen[:, 0], chosen[:, 1])),
+            shape=(total, total),
+        )
+        for view in range(views):
+            seed = walk_seed(spec["seed"], identity, spec["step"], group_id, view)
+            walk_options = (
+                spec["walks"]
+                if spec["walks_per_family"] is None
+                else {**spec["walks"], "k": spec["walks_per_family"][group_id]}
+            )
+            if spec["straight_p"] > 0:
+                paths = TRAWL.straight_walks(
+                    matrix,
+                    pivot_table,
+                    cell_vertices,
+                    int(walk_options.get("k", 32)),
+                    int(walk_options.get("length", 32)),
+                    spec["straight_p"],
+                    np.random.default_rng([seed, 2]),
+                )
+            else:
+                paths = sampler(matrix, seed=seed, **walk_options)
+            if not len(paths):
+                continue
+            slots = out[group_id]
+            slots[0].append(paths)
+            slots[1].append(np.full(len(paths), graph_id))
+            slots[2].append(np.full(len(paths), view))
+            if use_signs:
+                codes = np.zeros_like(paths)
+                codes[:, 1:] = sign_table[paths[:, :-1], paths[:, 1:]]
+                slots[3].append(codes)
+            if use_pivots:
+                step_pivots = np.full_like(paths, -1)
+                step_pivots[:, 1:] = pivot_table[paths[:, :-1], paths[:, 1:]]
+                slots[5].append(step_pivots)
+            if spec["vertex_ids"]:
+                vertex_info = TRAWL.anonymous_vertex_ids(
+                    cell_vertices,
+                    paths,
+                    np.where(step_pivots >= 0, step_pivots, -1)
+                    if use_pivots
+                    else None,
+                    np.random.default_rng([seed, 1]),
+                    spec["max_vertex_ids"],
+                    pointers=spec["back_pointers"],
+                )
+                slots[6].append(vertex_info[0])
+                slots[7].append(vertex_info[1])
+                if spec["back_pointers"]:
+                    slots[8].append(vertex_info[2])
+                if spec["vertex_features"]:
+                    # Rank-0 states lead each graph's state block.
+                    slots[9].append(cell_vertices[paths])
+            if spec["running_orientation"]:
+                local_ranks = np.repeat(np.arange(spec["num_ranks"]), count_row)
+                slots[4].append(
+                    TRAWL.running_orientation_codes(
+                        paths, local_ranks, codes, spec["num_ranks"] - 1
+                    )
+                )
+    return out
 
 
 class TRAWL(nn.Module):
@@ -1442,6 +1674,114 @@ class TRAWL(nn.Module):
         Graph embedding from ``"walks"`` or ``"cells"`` (default: "walks").
     transition_cache_size : int, optional
         Transition distributions cached by the sampler (default: 1024).
+    revisit_embedding : bool, optional
+        Embed, per walk step, the anonymous-walk ID (rank of the cell's first
+        occurrence in its walk) and the log2-bucketed number of steps since
+        the walk last visited the cell (default: False).
+    max_anonymous_ids : int, optional
+        Anonymous-walk IDs at or above this are clipped (default: 32).
+    orientation_embedding : bool, optional
+        Embed the signed boundary coefficient (+1/-1) of the incidence
+        crossed by each step; needs ``TRAWLTransform(signs=True)``
+        (default: False).
+    pe_skip : bool, optional
+        Add an MLP of per-graph, per-rank pooled encodings (mean, std, min,
+        max of ``trawl_pe`` plus the log cell count) to the graph embedding
+        (default: False).
+    pe_norm : bool, optional
+        Batch-normalize ``trawl_pe`` before its projection (default: False).
+    running_orientation : bool, optional
+        Embed, at each top-rank (triangle) step, the walk's running relative
+        orientation: the product of the local relative-orientation signs of
+        the triangle-to-triangle moves since the walk's reference triangle
+        (``-s(e, T) * s(e, T')`` across a shared face, or the signed
+        down-adjacency edge). Passing through a lower-rank cell other than a
+        shared face starts a new reference, marked separately. Needs
+        ``TRAWLTransform(signs=True)`` (default: False).
+    pivot_embedding : bool, optional
+        Add, at every adjacency step, a projection of the input state of the
+        cell the step pivots across (shared face or coface); needs
+        ``TRAWLTransform(pivots=True)`` (default: False).
+    cell_memory : bool, optional
+        Two-pass cross-rank memory. After the first encoding pass, every
+        token writes its state to a slot keyed by the cell it visits and by
+        the pivot cell it crossed (scatter-mean over all walks of every
+        family, O(tokens)); a second encoder reads both slots back into the
+        tokens. Needs ``TRAWLTransform(pivots=True)`` (default: False).
+    walk_attention : bool, optional
+        Self-attention over all walk summaries of a graph, across walk
+        families, before pooling (O(walks^2) per graph) (default: False).
+    vertex_ids : bool, optional
+        Add, per step, embeddings of walk-relative anonymous ids of the
+        current cell's vertices (order of first appearance in the walk;
+        vertices first met together are ordered randomly per walk, never by
+        label) and, separately, of those vertices that belong to the cell
+        crossed by the step (the pivot face). Unsigned structure only;
+        needs ``TRAWLTransform(cell_vertices=True)`` and, for the crossed-face
+        part, ``pivots=True`` (default: False).
+    walks_per_family : list of int, optional
+        With ``walk_scope="separate"``, the number of walks per family,
+        overriding ``walks.k`` (default: None).
+    back_pointers : bool, optional
+        After the encoder pass, every token reads the states of earlier
+        steps of its own walk that touched the same lower-rank cells: for
+        each of its vertices, the last earlier step containing that vertex,
+        and the last earlier visit of its own cell. Each pointed-to state is
+        combined with an embedding of the step offset and pointer slot, an
+        MLP, summed, and followed by one causal GRU pass. Cost
+        O(tokens x pointers); needs ``vertex_ids`` (default: False).
+    straight_p : float, optional
+        If positive, sample walks with a straight (zig-zag) bias instead of
+        the default sampler: from the second crossing on, with probability
+        ``straight_p`` the walk crosses to the neighbor whose shared cell
+        (pivot) avoids the vertex shared by the last two crossed pivots, so
+        consecutive turns alternate and the walk runs straight across the
+        complex; otherwise it picks a uniform non-backtracking neighbor.
+        Starts are uniform over states with neighbors. Uses only unsigned
+        local structure; needs ``TRAWLTransform(cell_vertices=True,
+        pivots=True)`` (default: 0.0, off).
+    use_pe : bool, optional
+        If False, the positional/structural encodings ``trawl_pe`` are left
+        out of the walk tokens (an ablation; the projection still exists)
+        (default: True).
+    max_cell_vertices : int, optional
+        Largest number of vertices of a cell, i.e. the column width of
+        ``trawl_cell_vertices``; sizes the back-pointer slot embedding (one
+        slot per vertex column plus one for the cell). None means
+        ``max_rank + 1`` (simplices); cell complexes from a cycle lifting
+        need ``max_cell_length`` (default: None).
+    vertex_features : bool, optional
+        With ``vertex_ids``, bind every vertex of a step's cell to its own
+        input features: per vertex, the sum of its anonymous-id embedding,
+        crossed-face embedding and a projection of its rank-0 input features
+        goes through a small MLP, and the results are summed into the token.
+        Back-pointers through a shared vertex then also carry what the
+        vertex is (e.g. its atom type) (default: False).
+    fallback_family : int, optional
+        With ``walk_scope="separate"``, the index of a transform relation
+        that is not walked as its own family but replaces, per graph, every
+        other family whose relation has no edges in that graph (e.g. edges
+        across shared vertices for graphs without adjacent 2-cells). None
+        walks every relation as its own family (default: None).
+    sampling_workers : int, optional
+        Host walk sampling (walks, anonymous ids, pointers) runs graph by
+        graph in this many forked worker processes; 0 samples in the main
+        process. Graphs are seeded independently, so the walks are the same
+        either way (default: 0).
+    gate_entropy : float, optional
+        With a learned family gate, add ``-gate_entropy`` times the mean
+        per-graph entropy of the gate weights to the training loss (an
+        entropy bonus against gate collapse), returned as ``aux_loss``
+        (default: 0.0, off).
+    family_dropout : float, optional
+        With a learned family gate, during training drop each available
+        family of each graph with this probability before the softmax (the
+        gate renormalizes over the rest; a graph keeps at least one family)
+        (default: 0.0, off).
+    eval_chunk_walks : int, optional
+        At evaluation, encode walks in chunks of at most this many walks to
+        bound memory (walks are encoded independently); None encodes all
+        walks of a family at once (default: None).
     """
 
     def __init__(
@@ -1471,8 +1811,41 @@ class TRAWL(nn.Module):
         occurrence_pooling="mean",
         graph_readout="walks",
         transition_cache_size=1024,
+        revisit_embedding=False,
+        max_anonymous_ids=32,
+        orientation_embedding=False,
+        pe_skip=False,
+        pe_norm=False,
+        running_orientation=False,
+        pivot_embedding=False,
+        cell_memory=False,
+        walk_attention=False,
+        vertex_ids=False,
+        walks_per_family=None,
+        use_pe=True,
+        back_pointers=False,
+        straight_p=0.0,
+        max_cell_vertices=None,
+        vertex_features=False,
+        fallback_family=None,
+        eval_chunk_walks=None,
+        gate_entropy=0.0,
+        family_dropout=0.0,
+        sampling_workers=0,
     ):
         super().__init__()
+        self.sampling_workers = int(sampling_workers)
+        self.gate_entropy = float(gate_entropy)
+        self.family_dropout = float(family_dropout)
+        if (self.gate_entropy or self.family_dropout) and (
+            fusion not in NeighborhoodFusion.GATED or walk_scope != "separate"
+        ):
+            raise ValueError(
+                "gate_entropy/family_dropout need a learned family gate"
+            )
+        self.eval_chunk_walks = (
+            None if eval_chunk_walks is None else int(eval_chunk_walks)
+        )
         choices = {
             "walk_scope": (walk_scope, {"union", "separate"}),
             "encoder_sharing": (encoder_sharing, {"shared", "independent"}),
@@ -1562,9 +1935,172 @@ class TRAWL(nn.Module):
         )
         self.output_norm = nn.LayerNorm(hidden_dim)
         self.output_dim = hidden_dim * (2 if pooling == "mean_max" else 1)
-        self.fusion = NeighborhoodFusion(
-            self.output_dim, num_neighborhoods, fusion
+        self.fallback_family = (
+            None if fallback_family is None else int(fallback_family)
         )
+        if self.fallback_family is not None and (
+            walk_scope != "separate"
+            or not 0 <= self.fallback_family < num_neighborhoods
+            or num_neighborhoods < 2
+        ):
+            raise ValueError(
+                "fallback_family needs walk_scope=separate and an index of "
+                "one of at least two relations"
+            )
+        self.fusion = NeighborhoodFusion(
+            self.output_dim,
+            num_neighborhoods - (self.fallback_family is not None),
+            fusion,
+        )
+        # Optional modules are created only when enabled, so default models
+        # draw exactly the same initial parameters as before.
+        self.revisit_embedding = bool(revisit_embedding)
+        self.orientation_embedding = bool(orientation_embedding)
+        self.pe_skip, self.pe_norm = bool(pe_skip), bool(pe_norm)
+        if self.revisit_embedding:
+            self.max_anonymous_ids = int(max_anonymous_ids)
+            self.anonymous = nn.Embedding(self.max_anonymous_ids, hidden_dim)
+            # 0: first visit; b >= 1: gap in [2 ** (b - 1), 2 ** b).
+            self.revisit_gap = nn.Embedding(self.REVISIT_BUCKETS, hidden_dim)
+        if self.orientation_embedding:
+            # 0: no incidence crossed (or first step), 1: +1, 2: -1.
+            self.orientation = nn.Embedding(3, hidden_dim)
+        self.running_orientation = bool(running_orientation)
+        if self.running_orientation:
+            # 0: not a top-rank step, 1: same, 2: flipped, 3: new reference.
+            self.running = nn.Embedding(4, hidden_dim)
+        self.pivot_embedding = bool(pivot_embedding)
+        self.cell_memory = bool(cell_memory)
+        self.walk_attention = bool(walk_attention)
+        if self.pivot_embedding:
+            self.pivot_projection = nn.Linear(hidden_dim, hidden_dim)
+        if self.cell_memory:
+            self.memory_self = nn.Linear(hidden_dim, hidden_dim)
+            self.memory_pivot = nn.Linear(hidden_dim, hidden_dim)
+            self.memory_encoders = copy.deepcopy(self.encoders)
+            for module in self.memory_encoders.modules():
+                if hasattr(module, "reset_parameters"):
+                    module.reset_parameters()
+        self.vertex_ids = bool(vertex_ids)
+        self.use_pe = bool(use_pe)
+        self.straight_p = float(straight_p)
+        if not 0.0 <= self.straight_p <= 1.0:
+            raise ValueError("straight_p must be in [0, 1]")
+        self.back_pointers = bool(back_pointers)
+        if self.back_pointers:
+            if not vertex_ids or cell_memory:
+                raise ValueError(
+                    "back_pointers needs vertex_ids and excludes cell_memory"
+                )
+            # One slot per vertex column of a cell, plus one for the cell.
+            self.max_cell_vertices = (
+                max_rank + 1
+                if max_cell_vertices is None
+                else int(max_cell_vertices)
+            )
+            slots = self.max_cell_vertices + 1
+            self.pointer_offset = nn.Embedding(self.REVISIT_BUCKETS, hidden_dim)
+            self.pointer_slot = nn.Embedding(slots, hidden_dim)
+            self.pointer_mlp = nn.Sequential(
+                nn.LayerNorm(hidden_dim),
+                nn.Linear(hidden_dim, hidden_dim),
+                nn.GELU(),
+                nn.Linear(hidden_dim, hidden_dim),
+            )
+            self.pointer_layer = make_layer({"kind": "gru"}, hidden_dim)
+        self.walks_per_family = (
+            None if walks_per_family is None else [int(k) for k in walks_per_family]
+        )
+        if self.walks_per_family is not None and (
+            walk_scope != "separate"
+            or len(self.walks_per_family) != num_neighborhoods
+        ):
+            raise ValueError(
+                "walks_per_family needs walk_scope=separate and one count per family"
+            )
+        if self.vertex_ids:
+            self.max_vertex_ids = int(max_anonymous_ids)
+            self.vertex_anonymous = nn.Embedding(
+                self.max_vertex_ids, hidden_dim
+            )
+            self.vertex_crossed = nn.Embedding(self.max_vertex_ids, hidden_dim)
+        if self.walk_attention:
+            self.family = nn.Embedding(num_neighborhoods, self.output_dim)
+            self.walk_mixer = nn.TransformerEncoderLayer(
+                d_model=self.output_dim,
+                nhead=4,
+                dim_feedforward=2 * self.output_dim,
+                dropout=0.0,
+                batch_first=True,
+                norm_first=True,
+            )
+        self.vertex_features = bool(vertex_features)
+        if self.vertex_features:
+            if not self.vertex_ids:
+                raise ValueError("vertex_features needs vertex_ids")
+            self.vertex_feature = nn.Linear(hidden_dim, hidden_dim)
+            self.vertex_mlp = nn.Sequential(
+                nn.LayerNorm(hidden_dim),
+                nn.Linear(hidden_dim, hidden_dim),
+                nn.GELU(),
+                nn.Linear(hidden_dim, hidden_dim),
+            )
+        if (self.pe_skip or self.pe_norm) and pe_dim is not None:
+            self._build_pe_modules(pe_dim)
+
+    REVISIT_BUCKETS = 12
+
+    def compile_layers(self, dynamic=True):
+        """Compile every sequence layer, with and without checkpointing.
+
+        Compiling the layer modules themselves fails when they are called
+        inside ``torch.utils.checkpoint``; compiling the checkpointed call as
+        one function works and keeps the math (and dropout RNG replay)
+        unchanged. Walk sampling stays eager on the host.
+
+        Parameters
+        ----------
+        dynamic : bool, optional
+            Mark shapes dynamic so varying walk counts do not recompile
+            (default: True).
+        """
+        from torch.utils.checkpoint import checkpoint
+
+        if getattr(self, "_compiled_calls", None) is not None:
+            return
+        self._compiled_calls = {}
+        for stack in list(self.encoders) + list(
+            getattr(self, "memory_encoders", [])
+        ):
+            for layer in stack:
+                self._compiled_calls[id(layer)] = (
+                    torch.compile(
+                        lambda x, layer=layer: checkpoint(
+                            layer, x, use_reentrant=False
+                        ),
+                        dynamic=dynamic,
+                    ),
+                    torch.compile(layer, dynamic=dynamic),
+                )
+
+    def _build_pe_modules(self, pe_dim):
+        """Create the encoding normalization and skip-readout modules.
+
+        Parameters
+        ----------
+        pe_dim : int
+            Width of ``trawl_pe``.
+        """
+        if self.pe_norm:
+            self.pe_batch_norm = SafeBatchNorm1d(pe_dim)
+        if self.pe_skip:
+            width = (self.max_rank + 1) * (4 * pe_dim + 1)
+            self.pe_skip_net = nn.Sequential(
+                SafeBatchNorm1d(width),
+                nn.Linear(width, self.hidden_dim),
+                nn.GELU(),
+                nn.Linear(self.hidden_dim, self.output_dim),
+            )
 
     def initialize(self, data_list):
         """Materialize projections from training data, including absent ranks.
@@ -1594,6 +2130,12 @@ class TRAWL(nn.Module):
                 projection(
                     torch.zeros(1, width, device=projection.weight.device)
                 )
+            if (self.pe_skip or self.pe_norm) and not (
+                hasattr(self, "pe_batch_norm") or hasattr(self, "pe_skip_net")
+            ):
+                device = self.sampling_step.device
+                self._build_pe_modules(data_list[0].trawl_pe.shape[1])
+                self.to(device)
             if isinstance(self.position, nn.LazyLinear):
                 self.position(
                     torch.zeros(
@@ -1611,6 +2153,9 @@ class TRAWL(nn.Module):
         "trawl_identity",
         "trawl_relations",
         "trawl_colors",
+        "trawl_signs",
+        "trawl_pivots",
+        "trawl_cell_vertices",
     )
 
     def _host(self, batch):
@@ -1688,7 +2233,430 @@ class TRAWL(nn.Module):
             return x.amax(dim=1)
         return torch.cat((x.amax(dim=1), x.mean(dim=1)), dim=-1)
 
-    def _encode(self, x, paths, ranks, relation):
+    def _revisit_codes(self, paths):
+        """Anonymous-walk IDs and revisit-gap buckets of every walk step.
+
+        Parameters
+        ----------
+        paths : torch.Tensor
+            Walk cell indices of shape ``[walk, time]``.
+
+        Returns
+        -------
+        tuple of torch.Tensor
+            ``(anonymous, gap)``, both ``[walk, time]``: the order of each
+            cell's first appearance in its own walk, and 0 for a first visit
+            or ``1 + floor(log2(steps since the last visit))``.
+        """
+        length = paths.shape[1]
+        time = torch.arange(length, device=paths.device)
+        same = paths.unsqueeze(2) == paths.unsqueeze(1)
+        # First occurrence: smallest matching time; previous: largest earlier.
+        first = torch.where(same, time, length).amin(dim=2)
+        earlier = same & (time.view(1, 1, -1) < time.view(1, -1, 1))
+        previous = torch.where(earlier, time, -1).amax(dim=2)
+        new = first == time
+        anonymous = (new.long().cumsum(dim=1) - 1).gather(1, first)
+        anonymous = anonymous.clamp_max(self.max_anonymous_ids - 1)
+        gap = (time - previous).clamp_min(1).float()
+        gap = torch.where(
+            previous >= 0,
+            1 + torch.floor(torch.log2(gap)).long(),
+            torch.zeros_like(previous),
+        ).clamp_max(self.REVISIT_BUCKETS - 1)
+        return anonymous, gap
+
+    @staticmethod
+    def running_orientation_codes(paths, ranks, codes, top):
+        """Running relative orientation of top-rank cells along walks.
+
+        Parameters
+        ----------
+        paths : np.ndarray
+            Graph-local walk states ``[walk, time]``.
+        ranks : np.ndarray
+            Rank of each graph-local state.
+        codes : np.ndarray
+            Sign code of each step (0 none, 1 for +1, 2 for -1),
+            ``[walk, time]``.
+        top : int
+            Rank whose cells carry the orientation (2 for surfaces).
+
+        Returns
+        -------
+        np.ndarray
+            ``[walk, time]`` codes: 0 not a top-rank step, 1 same orientation
+            as the reference, 2 flipped, 3 new reference.
+        """
+        sign = np.where(codes == 1, 1, np.where(codes == 2, -1, 0))
+        rank = ranks[paths]
+        out = np.zeros_like(paths)
+        state = np.zeros(len(paths), dtype=np.int64)
+        for t in range(paths.shape[1]):
+            here = rank[:, t] == top
+            if t >= 1:
+                direct = here & (rank[:, t - 1] == top)
+                factor = sign[:, t]
+            else:
+                direct = np.zeros_like(here)
+                factor = np.zeros(len(paths), dtype=np.int64)
+            if t >= 2:
+                across = (
+                    here & (rank[:, t - 1] == top - 1) & (rank[:, t - 2] == top)
+                )
+                factor = np.where(
+                    across, -sign[:, t - 1] * sign[:, t], factor
+                )
+            else:
+                across = np.zeros_like(here)
+            chained = (direct | across) & (state != 0) & (factor != 0)
+            fresh = here & ~chained
+            state = np.where(chained, state * factor, state)
+            state = np.where(fresh, 1, state)
+            out[:, t] = np.where(
+                fresh, 3, np.where(chained, np.where(state > 0, 1, 2), 0)
+            )
+        return out
+
+    @staticmethod
+    def straight_walks(matrix, pivot_table, cell_vertices, k, length, p, rng):
+        """Sample straight-biased non-backtracking walks.
+
+        Parameters
+        ----------
+        matrix : scipy.sparse.spmatrix
+            Graph-local relation matrix (states x states).
+        pivot_table : np.ndarray
+            ``[states, states]`` graph-local pivot state per edge, -1 none.
+        cell_vertices : np.ndarray
+            ``[states, R]`` graph-local vertices per state, -1 padded.
+        k : int
+            Number of walks.
+        length : int
+            States per walk.
+        p : float
+            Probability of the straight move when it is defined.
+        rng : np.random.Generator
+            Source of all random draws.
+
+        Returns
+        -------
+        np.ndarray
+            ``[k, length]`` graph-local walk states.
+        """
+        csr = matrix.tocsr()
+        degree = np.diff(csr.indptr)
+        active = np.flatnonzero(degree > 0)
+        if not len(active):
+            return np.empty((0, length), dtype=np.int64)
+        width = int(degree.max())
+        rows = np.repeat(np.arange(csr.shape[0]), degree)
+        slots = np.arange(csr.nnz) - csr.indptr[rows]
+        neighbors = np.full((csr.shape[0], width), -1, dtype=np.int64)
+        neighbors[rows, slots] = csr.indices
+        faces = np.full((csr.shape[0], width), -1, dtype=np.int64)
+        faces[rows, slots] = pivot_table[rows, csr.indices]
+        face_vertices = np.where(
+            (faces >= 0)[..., None], cell_vertices[np.maximum(faces, 0)], -1
+        )  # [states, width, R]
+        walks = np.arange(k)
+        current = active[rng.integers(len(active), size=k)]
+        previous = np.full(k, -1, dtype=np.int64)
+        last_face = np.full(k, -1, dtype=np.int64)
+        before_face = np.full(k, -1, dtype=np.int64)
+        out = np.empty((k, length), dtype=np.int64)
+        out[:, 0] = current
+        for t in range(1, length):
+            candidates = neighbors[current]
+            valid = (candidates >= 0) & (candidates != previous[:, None])
+            stuck = ~valid.any(axis=1)
+            valid = np.where(stuck[:, None], candidates >= 0, valid)
+            # Pivot vertex: the single vertex shared by the last two pivots.
+            a = np.where((last_face >= 0)[:, None], cell_vertices[np.maximum(last_face, 0)], -1)
+            b = np.where((before_face >= 0)[:, None], cell_vertices[np.maximum(before_face, 0)], -2)
+            shared = (a[:, :, None] == b[:, None, :]) & (a[:, :, None] >= 0)
+            count = shared.any(axis=2).sum(axis=1)
+            vertex = np.where(
+                count == 1,
+                np.take_along_axis(a, shared.any(axis=2).argmax(axis=1)[:, None], 1)[:, 0],
+                -1,
+            )
+            avoids = ~(face_vertices[current] == vertex[:, None, None]).any(axis=2)
+            straight = valid & avoids & (vertex >= 0)[:, None]
+            use = (rng.random(k) < p) & straight.any(axis=1)
+            pool = np.where(use[:, None], straight, valid)
+            choice = np.where(pool, rng.random(pool.shape), -1.0).argmax(axis=1)
+            following = candidates[walks, choice]
+            before_face = last_face
+            last_face = faces[current, choice]
+            previous = current
+            current = following
+            out[:, t] = current
+        return out
+
+    @staticmethod
+    def anonymous_vertex_ids(
+        cell_vertices, paths, pivots, rng, cap, pointers=False
+    ):
+        """Walk-relative anonymous vertex ids of every step.
+
+        Parameters
+        ----------
+        cell_vertices : np.ndarray
+            ``[states, R]`` graph-local vertex indices per state, -1 padded.
+        paths : np.ndarray
+            Graph-local walk states ``[walk, time]``.
+        pivots : np.ndarray or None
+            Graph-local pivot state per step, -1 for none.
+        rng : np.random.Generator
+            Orders vertices met at the same step.
+        cap : int
+            Ids at or above ``cap - 1`` are clipped.
+        pointers : bool, optional
+            Also return, per step and vertex column, the last earlier step
+            of the walk whose cell contains that vertex (-1 if none)
+            (default: False).
+
+        Returns
+        -------
+        tuple of np.ndarray
+            ``ids`` ``[walk, time, R]`` (-1 for padding) and ``crossed``
+            ``[walk, time, R]`` booleans marking vertices of the pivot cell,
+            both aligned with the columns of ``cell_vertices``.
+        """
+        walks, length = paths.shape
+        verts = cell_vertices[paths]  # [W, L, R]
+        width = verts.shape[2]
+        order = np.argsort(rng.random(verts.shape), axis=2)
+        verts = np.take_along_axis(verts, order, axis=2)
+        flat = verts.reshape(walks, length * width)
+        valid = flat >= 0
+        size = length * width
+        position = np.arange(size)
+        # One stable sort by (walk, vertex) groups every vertex's
+        # occurrences in walk order, so the first occurrence and the
+        # previous one are a scan away: O(P log P) instead of the [W, P, P]
+        # comparison. Padding (-1) forms its own group and is masked below.
+        span = int(flat.max()) + 2 if flat.size else 1
+        key = (np.arange(walks)[:, None] * span + flat + 1).ravel()
+        sort = np.argsort(key, kind="stable")
+        sorted_key = key[sort]
+        head = np.ones(len(sort), dtype=bool)
+        head[1:] = sorted_key[1:] != sorted_key[:-1]
+        sorted_pos = sort % size if size else sort
+        group_head = np.maximum.accumulate(
+            np.where(head, np.arange(len(sort)), 0)
+        )
+        first = np.empty(len(sort), dtype=np.int64)
+        first[sort] = sorted_pos[group_head]
+        first = first.reshape(walks, size)
+        new = valid & (first == position)
+        rank = np.cumsum(new, axis=1) - 1
+        ids = np.take_along_axis(rank, first, axis=1)
+        ids = np.where(valid, np.minimum(ids, cap - 1), -1)
+        ids = ids.reshape(walks, length, width)
+        crossed = np.zeros(ids.shape, dtype=bool)
+        if pivots is not None:
+            face = np.where(
+                (pivots >= 0)[..., None],
+                cell_vertices[np.maximum(pivots, 0)],
+                -1,
+            )  # [W, L, R]
+            crossed = (verts[..., :, None] == face[..., None, :]).any(-1) & (
+                verts >= 0
+            )
+        # Back to the cell's column order (ids themselves stay random).
+        inverse = np.argsort(order, axis=2)
+        ids = np.take_along_axis(ids, inverse, axis=2)
+        crossed = np.take_along_axis(crossed, inverse, axis=2)
+        if not pointers:
+            return ids, crossed
+        # The previous occurrence of a vertex in its sorted group is the
+        # last earlier step containing it (a cell lists a vertex once).
+        sorted_prev = np.full(len(sort), -1, dtype=np.int64)
+        sorted_prev[1:] = np.where(head[1:], -1, sorted_pos[:-1] // width)
+        previous = np.empty(len(sort), dtype=np.int64)
+        previous[sort] = sorted_prev
+        previous = previous.reshape(walks, size)
+        previous = np.where(valid, previous, -1).reshape(walks, length, width)
+        previous = np.take_along_axis(previous, inverse, axis=2)
+        return ids, crossed, previous
+
+    def _vertex_tokens(self, ids, crossed, vertex_states=None, features=None):
+        """Sum of anonymous vertex-id embeddings per token.
+
+        Parameters
+        ----------
+        ids : torch.Tensor
+            ``[walk, time, R]`` anonymous ids, -1 for padding.
+        crossed : torch.Tensor
+            ``[walk, time, R]`` crossed-face membership.
+        vertex_states : torch.Tensor, optional
+            ``[walk, time, R]`` global state index of each vertex, -1 for
+            padding; used by ``vertex_features`` (default: None).
+        features : torch.Tensor, optional
+            Projected input features of every state ``[states, hidden]``;
+            used by ``vertex_features`` (default: None).
+
+        Returns
+        -------
+        torch.Tensor
+            ``[walk, time, hidden]``.
+        """
+        if ids.shape[2] <= self.max_rank + 1 and not self.vertex_features:
+            # Simplicial width: the original dense computation.
+            valid = (ids >= 0).unsqueeze(-1)
+            safe = ids.clamp_min(0)
+            own = (self.vertex_anonymous(safe) * valid).sum(dim=2)
+            face = (self.vertex_crossed(safe) * crossed.unsqueeze(-1)).sum(
+                dim=2
+            )
+            return own + face
+        # Wide cells (cell complexes) are mostly padding: embed only the
+        # valid vertex entries and sum them per token, so memory follows the
+        # number of real vertices, not walks x time x width x hidden.
+        walk, time, column = torch.nonzero(ids >= 0, as_tuple=True)
+        entry = ids[walk, time, column]
+        value = self.vertex_anonymous(entry) + self.vertex_crossed(
+            entry
+        ) * crossed[walk, time, column].unsqueeze(-1)
+        if self.vertex_features:
+            # Bind each vertex's id to what it is.
+            value = value + self.vertex_mlp(
+                value
+                + self.vertex_feature(
+                    features[vertex_states[walk, time, column]]
+                )
+            )
+        slot = walk * ids.shape[1] + time
+        out = value.new_zeros(ids.shape[0] * ids.shape[1], value.shape[-1])
+        return out.index_add(0, slot, value).view(*ids.shape[:2], -1)
+
+    def _memory_pass(self, x, ranks, prepared, num_states, extras=None):
+        """Second encoding pass reading a per-cell memory of the first.
+
+        Every first-pass token writes its state to the slot of the cell it
+        visits and of the pivot cell its step crossed; slots average over all
+        walks of every family. Each token of the second pass reads its cell's
+        and its pivot's slot. Cost is linear in the number of tokens.
+
+        Parameters
+        ----------
+        x : torch.Tensor
+            State inputs ``[states, hidden]``.
+        ranks : torch.Tensor
+            Rank of each state.
+        prepared : list
+            Per group ``(paths, owners, views, codes, running, pivots,
+            encoded)`` or None.
+        num_states : int
+            Number of states in the batch.
+        extras : list, optional
+            Per group additional token inputs reused in the second pass
+            (default: None).
+
+        Returns
+        -------
+        list
+            ``prepared`` with second-pass encodings.
+        """
+        memory = x.new_zeros(num_states, x.shape[1], dtype=torch.float32)
+        count = memory.new_zeros(num_states, 1)
+        for item in prepared:
+            if item is None:
+                continue
+            paths, _, _, _, _, pivots, encoded = item
+            states = encoded.flatten(0, 1).float()
+            ones = count.new_ones(len(states), 1)
+            memory.index_add_(0, paths.flatten(), states)
+            count.index_add_(0, paths.flatten(), ones)
+            flat = pivots.flatten()
+            has = flat >= 0
+            memory.index_add_(0, flat[has], states[has])
+            count.index_add_(0, flat[has], ones[has])
+        memory = memory / count.clamp_min(1)
+        out = []
+        for group_id, item in enumerate(prepared):
+            if item is None:
+                out.append(None)
+                continue
+            paths, owners, view_ids, codes, running, pivots, _ = item
+            has = (pivots >= 0).unsqueeze(-1)
+            extra = self.memory_self(memory[paths].to(x.dtype)) + has * (
+                self.memory_pivot(memory[pivots.clamp_min(0)].to(x.dtype))
+            )
+            if extras is not None and extras[group_id] is not None:
+                extra = extra + extras[group_id]
+            encoded = self._encode(
+                x,
+                paths,
+                ranks,
+                group_id,
+                codes,
+                running,
+                pivots,
+                extra=extra,
+                encoders=self.memory_encoders,
+            )
+            out.append(
+                (paths, owners, view_ids, codes, running, pivots, encoded)
+            )
+        return out
+
+    def _attend_walks(self, walks, owners, families, num_graphs, fallback):
+        """Mix all walk summaries of each graph with self-attention.
+
+        Parameters
+        ----------
+        walks : torch.Tensor
+            Pooled walk embeddings ``[walks, output_dim]``.
+        owners : torch.Tensor
+            Graph of each walk.
+        families : torch.Tensor
+            Walk family (neighborhood group) of each walk.
+        num_graphs : int
+            Number of graphs.
+        fallback : torch.Tensor
+            Graph embeddings used for graphs without walks.
+
+        Returns
+        -------
+        torch.Tensor
+            Graph embeddings ``[graphs, output_dim]``.
+        """
+        values = walks + self.family(families).to(walks.dtype)
+        order = torch.argsort(owners, stable=True)
+        values, owners = values[order], owners[order]
+        counts = torch.bincount(owners, minlength=num_graphs)
+        width = int(counts.max())
+        first = torch.cumsum(counts, 0) - counts
+        slot = torch.arange(len(owners), device=owners.device) - first[owners]
+        padded = values.new_zeros(num_graphs, width, values.shape[1])
+        padded[owners, slot] = values
+        pad = (
+            torch.arange(width, device=owners.device)[None] >= counts[:, None]
+        )
+        pad[:, 0] &= counts > 0  # keep one slot open for empty graphs
+        mixed = self.walk_mixer(padded, src_key_padding_mask=pad)
+        keep = (~pad).unsqueeze(-1) & (counts > 0)[:, None, None]
+        pooled = (mixed * keep).sum(dim=1) / counts.clamp_min(1)[:, None]
+        return torch.where(
+            (counts > 0)[:, None], pooled.to(fallback.dtype), fallback
+        )
+
+    def _encode(
+        self,
+        x,
+        paths,
+        ranks,
+        relation,
+        signs=None,
+        running=None,
+        pivots=None,
+        extra=None,
+        encoders=None,
+        pointers=None,
+    ):
         """Encode sampled walks with the sequence layers.
 
         Parameters
@@ -1701,6 +2669,22 @@ class TRAWL(nn.Module):
             Rank of each cell, shape ``[cells]``.
         relation : int
             Neighborhood group index selecting the encoder.
+        signs : torch.Tensor, optional
+            Orientation code per step (0 none, 1 for +1, 2 for -1), shape
+            ``[walk, time]``; used by ``orientation_embedding``
+            (default: None).
+        running : torch.Tensor, optional
+            Running-orientation code per step (default: None).
+        pivots : torch.Tensor, optional
+            Global pivot state per step, -1 for none (default: None).
+        extra : torch.Tensor, optional
+            Additional token input ``[walk, time, hidden]`` (default: None).
+        encoders : nn.ModuleList, optional
+            Encoder stacks replacing ``self.encoders`` (default: None).
+        pointers : torch.Tensor, optional
+            ``[walk, time, R]`` last earlier step touching each vertex of
+            the step's cell, -1 for none; used by ``back_pointers``
+            (default: None).
 
         Returns
         -------
@@ -1715,16 +2699,178 @@ class TRAWL(nn.Module):
                 path_ranks[:, 1:] - path_ranks[:, :-1]
             )
             tokens = tokens + self.move(movement + 1)
+        if self.revisit_embedding:
+            anonymous, gap = self._revisit_codes(paths)
+            tokens = tokens + self.anonymous(anonymous) + self.revisit_gap(gap)
+        if self.orientation_embedding:
+            tokens = tokens + self.orientation(signs)
+        if self.running_orientation:
+            tokens = tokens + self.running(running)
+        if self.pivot_embedding:
+            has = (pivots >= 0).unsqueeze(-1)
+            tokens = tokens + has * self.pivot_projection(
+                x[pivots.clamp_min(0)]
+            )
+        if extra is not None:
+            tokens = tokens + extra
         tokens = self.dropout(self.input_norm(tokens))
-        encoder = self.encoders[0 if len(self.encoders) == 1 else relation]
+        stacks = self.encoders if encoders is None else encoders
+        encoder = stacks[0 if len(stacks) == 1 else relation]
+        compiled = getattr(self, "_compiled_calls", None)
         for layer in encoder:
             if self.checkpoint_layers and self.training:
-                from torch.utils.checkpoint import checkpoint
+                if compiled is not None:
+                    # Compiled "checkpoint(layer, x)": dynamo handles the
+                    # checkpoint as one higher-order op (RNG state included).
+                    tokens = compiled[id(layer)][0](tokens)
+                else:
+                    from torch.utils.checkpoint import checkpoint
 
-                tokens = checkpoint(layer, tokens, use_reentrant=False)
+                    tokens = checkpoint(layer, tokens, use_reentrant=False)
+            elif compiled is not None:
+                tokens = compiled[id(layer)][1](tokens)
             else:
                 tokens = layer(tokens)
+        if self.back_pointers:
+            if (
+                self.checkpoint_layers
+                and self.training
+                and pointers.shape[2] > self.max_rank + 1
+            ):
+                # Wide cells: also checkpoint the pointer pass (memory only).
+                from torch.utils.checkpoint import checkpoint
+
+                tokens = checkpoint(
+                    self._follow_pointers,
+                    tokens,
+                    paths,
+                    pointers,
+                    use_reentrant=False,
+                )
+            else:
+                tokens = self._follow_pointers(tokens, paths, pointers)
         return self.output_norm(tokens)
+
+    @staticmethod
+    def previous_visit(paths):
+        """Last earlier step of each walk visiting the same state.
+
+        A stable sort of every walk by state keeps visits of one state in
+        time order, so each visit's predecessor in the sort is its previous
+        visit: O(L log L) per walk instead of an ``[W, L, L]`` comparison.
+
+        Parameters
+        ----------
+        paths : torch.Tensor
+            Walk states ``[walk, time]``.
+
+        Returns
+        -------
+        torch.Tensor
+            ``[walk, time]`` step of the previous visit, -1 for none.
+        """
+        values, order = torch.sort(paths, dim=1, stable=True)
+        previous = torch.full_like(order, -1)
+        repeat = values[:, 1:] == values[:, :-1]
+        previous[:, 1:] = torch.where(repeat, order[:, :-1], -1)
+        return torch.full_like(order, -1).scatter_(1, order, previous)
+
+    def _follow_pointers(self, tokens, paths, pointers):
+        """Read the states of earlier steps that touched the same cells.
+
+        Parameters
+        ----------
+        tokens : torch.Tensor
+            Encoded states ``[walk, time, hidden]``.
+        paths : torch.Tensor
+            Walk states ``[walk, time]``.
+        pointers : torch.Tensor
+            ``[walk, time, R]`` vertex back-pointers (-1 for none).
+
+        Returns
+        -------
+        torch.Tensor
+            Updated states ``[walk, time, hidden]``.
+        """
+        walks, length = paths.shape
+        time = torch.arange(length, device=paths.device)
+        cell = self.previous_visit(paths)  # [W, L]
+        targets = torch.cat((pointers, cell.unsqueeze(-1)), dim=2)  # [W,L,P]
+        valid = targets >= 0
+        if targets.shape[2] > self.max_rank + 2:
+            # Wide cells: only valid pointers are gathered and transformed,
+            # so memory follows the number of real pointers.
+            walk, step, slot = torch.nonzero(valid, as_tuple=True)
+            target = targets[walk, step, slot]
+            offset = (step - target).clamp_min(1).float()
+            bucket = (1 + torch.floor(torch.log2(offset)).long()).clamp_max(
+                self.REVISIT_BUCKETS - 1
+            )
+            gathered = tokens[walk, target]
+            message = self.pointer_mlp(
+                gathered
+                + self.pointer_offset(bucket).to(gathered.dtype)
+                + self.pointer_slot(slot).to(gathered.dtype)
+            )
+            summed = message.new_zeros(walks * length, message.shape[-1])
+            summed = summed.index_add(0, walk * length + step, message)
+            return self.pointer_layer(
+                tokens + summed.view(walks, length, -1).to(tokens.dtype)
+            )
+        index = targets.clamp_min(0)
+        gathered = torch.gather(
+            tokens.unsqueeze(2).expand(-1, -1, index.shape[2], -1),
+            1,
+            index.unsqueeze(-1).expand(-1, -1, -1, tokens.shape[-1]),
+        )
+        offset = (time.view(1, -1, 1) - targets).clamp_min(1).float()
+        bucket = (1 + torch.floor(torch.log2(offset)).long()).clamp_max(
+            self.REVISIT_BUCKETS - 1
+        )
+        slot = torch.arange(index.shape[2], device=paths.device)
+        message = self.pointer_mlp(
+            gathered
+            + self.pointer_offset(bucket).to(gathered.dtype)
+            + self.pointer_slot(slot).to(gathered.dtype)
+        )
+        message = (message * valid.unsqueeze(-1)).sum(dim=2)
+        return self.pointer_layer(tokens + message)
+
+    def _pe_summary(self, pe, ranks, state_graph, counts):
+        """Per-graph, per-rank mean/std/min/max of encodings and log counts.
+
+        Parameters
+        ----------
+        pe : torch.Tensor
+            State encodings ``[states, pe_dim]``.
+        ranks : torch.Tensor
+            Rank of each state.
+        state_graph : torch.Tensor
+            Graph of each state.
+        counts : np.ndarray
+            Cells per graph and rank, ``[graphs, ranks]``.
+
+        Returns
+        -------
+        torch.Tensor
+            Summary of shape ``[graphs, ranks * (4 * pe_dim + 1)]``; ranks
+            without cells get zeros.
+        """
+        num_graphs, num_ranks = counts.shape
+        pe = pe.float()
+        key = state_graph * num_ranks + ranks
+        size = num_graphs * num_ranks
+        mean = scatter(pe, key, 0, size, reduce="mean")
+        square = scatter(pe * pe, key, 0, size, reduce="mean")
+        std = (square - mean * mean).clamp_min(0).sqrt()
+        high = scatter(pe, key, 0, size, reduce="max")
+        low = -scatter(-pe, key, 0, size, reduce="max")
+        present = torch.bincount(key, minlength=size).gt(0).unsqueeze(-1)
+        stats = torch.cat((mean, std, low, high), dim=-1) * present
+        log_counts = torch.log1p(
+            torch.as_tensor(counts, dtype=pe.dtype, device=pe.device)
+        ).view(size, 1)
+        return torch.cat((stats, log_counts), dim=-1).view(num_graphs, -1)
 
     def forward(self, batch):
         """Sample and encode walks for every graph in the batch.
@@ -1744,218 +2890,431 @@ class TRAWL(nn.Module):
         host = self._host(batch)
         counts = host["trawl_counts"].reshape(-1, self.max_rank + 1)
         edge_slices = getattr(batch, "_slice_dict", {}).get("trawl_edges")
-        node_offsets = np.zeros(self.max_rank + 1, dtype=int)
-        state_offset = 0
-        (
-            graph_embeddings,
-            nodes,
-            node_batches,
-            walk_embeddings,
-            walk_batches,
-        ) = [], [], [], [], []
-        all_cells, all_ranks, walk_views = [], [], []
-        rank_cells = [[] for _ in range(self.max_rank + 1)]
-        rank_batches = [[] for _ in range(self.max_rank + 1)]
+        num_graphs, num_ranks = counts.shape
         views = 1 if self.training else self.eval_views
         step = self.next_sampling_step() if self.training else 0
         if self.walk_refresh != "train":
             step = 0
         device = batch.trawl_pe.device
+        if (host["trawl_relations"][:num_graphs] != self.num_neighborhoods).any():
+            raise ValueError("Transform/model neighborhood counts differ")
 
-        def index(size, value):
-            """Constant index vector.
+        # States are graph-major, rank-minor; trawl_signal_r rows are stored
+        # per rank in graph order. Encode each rank once, then reorder.
+        totals = counts.sum(axis=1)
+        starts = np.concatenate(([0], np.cumsum(totals)[:-1]))
+        rank_starts = np.concatenate(([0], np.cumsum(counts.sum(axis=0))[:-1]))
+        within = np.cumsum(counts, axis=0) - counts
+        order = np.concatenate(
+            [
+                np.arange(counts[g, r]) + rank_starts[r] + within[g, r]
+                for g in range(num_graphs)
+                for r in range(num_ranks)
+            ]
+            or [np.empty(0, dtype=int)]
+        )
+        features = torch.cat(
+            [
+                self.features[rank](batch[f"trawl_signal_{rank}"])
+                for rank in range(num_ranks)
+            ]
+        )[upload(order, device)]
+        num_states = int(totals.sum())
+        ranks = upload(
+            np.repeat(np.tile(np.arange(num_ranks), num_graphs), counts.ravel()),
+            device,
+        )
+        state_graph = upload(np.repeat(np.arange(num_graphs), totals), device)
+        pe = batch.trawl_pe[:num_states]
+        if self.pe_norm:
+            pe = self.pe_batch_norm(pe)
+        x = features + self.position(pe) if self.use_pe else features
+        if self.rank is not None:
+            x = x + self.rank(ranks)
+        if self.color is not None:
+            host_colors = host["trawl_colors"][:num_states]
+            if (
+                host_colors.size
+                and int(host_colors.max()) >= self.color.num_embeddings
+            ):
+                raise ValueError(
+                    "num_colors is smaller than a transformed color ID"
+                )
+            x = x + self.color(batch.trawl_colors[:num_states])
+
+        def pool_by_graph(values):
+            """Pool state rows per graph, as ``_pool`` does over time.
 
             Parameters
             ----------
-            size : int
-                Length.
-            value : int
-                Fill value.
+            values : torch.Tensor
+                State rows of shape ``[states, hidden]``.
 
             Returns
             -------
             torch.Tensor
-                Long tensor of ``size`` copies of ``value``.
+                Pooled rows of shape ``[graphs, output_dim]``.
             """
-            return torch.full((size,), value, dtype=torch.long, device=device)
+            mean = scatter(values, state_graph, 0, num_graphs, reduce="mean")
+            if self.pooling == "mean":
+                return mean
+            amax = scatter(values, state_graph, 0, num_graphs, reduce="max")
+            if self.pooling == "max":
+                return amax
+            return torch.cat((amax, mean), dim=-1)
 
-        for graph_id, sizes in enumerate(counts):
-            if (
-                int(host["trawl_relations"][graph_id])
-                != self.num_neighborhoods
-            ):
-                raise ValueError("Transform/model neighborhood counts differ")
-            signals = []
-            for rank, size in enumerate(sizes):
-                raw = batch[f"trawl_signal_{rank}"][
-                    node_offsets[rank] : node_offsets[rank] + size
-                ]
-                signals.append(
-                    self.features[rank](raw)
-                    if size
-                    else batch.trawl_pe.new_empty(0, self.hidden_dim)
-                )
-                node_offsets[rank] += size
-            features = torch.cat(signals)
-            total = int(sizes.sum())
-            ranks = upload(
-                np.repeat(np.arange(len(sizes)), sizes), features.device
+        fallback = pool_by_graph(features)
+
+        # Sample on the host per graph, then encode each group's walks from
+        # the whole batch in one pass.
+        groups = (
+            [None]
+            if self.walk_scope == "union"
+            else [
+                r
+                for r in range(self.num_neighborhoods)
+                if r != self.fallback_family
+            ]
+        )
+        sampled = [([], [], [], [], [], [], [], [], [], []) for _ in groups]
+        if self.vertex_ids and "trawl_cell_vertices" not in host:
+            raise ValueError(
+                "vertex_ids needs TRAWLTransform(cell_vertices=True)"
             )
-            x = features + self.position(
-                batch.trawl_pe[state_offset : state_offset + total]
+        use_pivots = (
+            self.pivot_embedding
+            or self.cell_memory
+            or self.straight_p > 0
+            or (self.vertex_ids and "trawl_pivots" in host)
+        )
+        if self.straight_p > 0 and "trawl_cell_vertices" not in host:
+            raise ValueError(
+                "straight_p needs TRAWLTransform(cell_vertices=True)"
             )
-            if self.rank is not None:
-                x = x + self.rank(ranks)
-            if self.color is not None:
-                colors = batch.trawl_colors[
-                    state_offset : state_offset + total
-                ]
-                host_colors = host["trawl_colors"][
-                    state_offset : state_offset + total
-                ]
-                if (
-                    host_colors.size
-                    and int(host_colors.max()) >= self.color.num_embeddings
-                ):
-                    raise ValueError(
-                        "num_colors is smaller than a transformed color ID"
-                    )
-                x = x + self.color(colors)
+        if use_pivots and "trawl_pivots" not in host:
+            raise ValueError("pivot mechanisms need TRAWLTransform(pivots=True)")
+        use_signs = self.orientation_embedding or self.running_orientation
+        if use_signs and "trawl_signs" not in host:
+            raise ValueError(
+                "orientation embeddings need TRAWLTransform(signs=True)"
+            )
+        spec = {
+            "groups": groups,
+            "fallback_family": self.fallback_family,
+            "views": views,
+            "seed": self.seed,
+            "step": step,
+            "walks": self.walks,
+            "walks_per_family": self.walks_per_family,
+            "straight_p": self.straight_p,
+            "use_pivots": use_pivots,
+            "use_signs": use_signs,
+            "vertex_ids": self.vertex_ids,
+            "max_vertex_ids": getattr(self, "max_vertex_ids", None),
+            "back_pointers": self.back_pointers,
+            "vertex_features": getattr(self, "vertex_features", False),
+            "running_orientation": self.running_orientation,
+            "num_ranks": num_ranks,
+        }
+        items = []
+        for graph_id in range(num_graphs):
+            total = int(totals[graph_id])
             if edge_slices is None:
-                edges, weights = host["trawl_edges"], host["trawl_weights"]
+                lo, hi = 0, len(host["trawl_edges"])
             else:
-                start, stop = (
+                lo, hi = (
                     int(edge_slices[graph_id]),
                     int(edge_slices[graph_id + 1]),
                 )
-                edges, weights = (
-                    host["trawl_edges"][start:stop],
-                    host["trawl_weights"][start:stop],
+            first = int(starts[graph_id])
+            items.append(
+                (
+                    graph_id,
+                    total,
+                    first,
+                    int(host["trawl_identity"][graph_id]),
+                    host["trawl_edges"][lo:hi],
+                    host["trawl_weights"][lo:hi],
+                    host["trawl_signs"][lo:hi] if "trawl_signs" in host else None,
+                    host["trawl_pivots"][lo:hi] if "trawl_pivots" in host else None,
+                    host["trawl_cell_vertices"][first : first + total]
+                    if "trawl_cell_vertices" in host
+                    else None,
+                    counts[graph_id],
                 )
-            groups = (
-                [None]
-                if self.walk_scope == "union"
-                else list(range(self.num_neighborhoods))
             )
-            fallback = self._pool(features[None])[0]
-            per_group, availability = [], []
-            # Accumulate occurrences in full precision under autocast. Embedding
-            # additions can promote encoded states independently of projections.
-            accumulation_dtype = (
-                torch.float32
-                if features.dtype in {torch.float16, torch.bfloat16}
-                else features.dtype
+        if self.sampling_workers > 0 and num_graphs > 1:
+            pool = _sampling_pool(
+                self.sampling_workers, self.walk_sampler.cache_size
             )
-            contextual = torch.zeros_like(features, dtype=accumulation_dtype)
-            visits = contextual.new_zeros(total, 1)
-            occurrence_values, occurrence_ids = [], []
-            for group_id, relation in enumerate(groups):
-                select = (
-                    np.ones(len(edges), dtype=bool)
-                    if relation is None
-                    else edges[:, 2] == relation
+            chunk = max(1, -(-num_graphs // (2 * self.sampling_workers)))
+            results = pool.map(
+                functools.partial(_sample_graph, spec), items, chunksize=chunk
+            )
+        else:
+            results = [
+                _sample_graph(spec, item, self.walk_sampler) for item in items
+            ]
+        # Same order as sampling graph by graph: graphs, then groups/views.
+        for graph_id, result in enumerate(results):
+            first = int(starts[graph_id])
+            for group_id, slots in enumerate(result):
+                for slot, values in enumerate(slots):
+                    for value in values:
+                        if slot == 0:
+                            value = value + first
+                        elif slot in (5, 9):
+                            # Graph-local states (-1 = none) to batch states.
+                            value = np.where(value >= 0, value + first, -1)
+                        sampled[group_id][slot].append(value)
+
+        # Accumulate occurrences in full precision under autocast. Embedding
+        # additions can promote encoded states independently of projections.
+        accumulation_dtype = (
+            torch.float32
+            if features.dtype in {torch.float16, torch.bfloat16}
+            else features.dtype
+        )
+        contextual = torch.zeros_like(features, dtype=accumulation_dtype)
+        visits = contextual.new_zeros(num_states, 1)
+        occurrence_values, occurrence_ids = [], []
+        walk_embeddings, walk_batches, walk_views = [], [], []
+        per_group, availability = [], []
+        prepared, vertex_extras = [], []
+        for group_id, (
+            paths,
+            owners,
+            view_ids,
+            codes,
+            running,
+            step_pivots,
+            vertex_ids,
+            vertex_crossed,
+            vertex_pointers,
+            vertex_states,
+        ) in enumerate(sampled):
+            if not paths:
+                prepared.append(None)
+                vertex_extras.append(None)
+                continue
+            paths = upload(np.concatenate(paths), device)
+            owners = upload(np.concatenate(owners), device)
+            view_ids = upload(np.concatenate(view_ids), device)
+            codes = (
+                upload(np.concatenate(codes), device)
+                if self.orientation_embedding
+                else None
+            )
+            running = (
+                upload(np.concatenate(running), device)
+                if self.running_orientation
+                else None
+            )
+            step_pivots = (
+                upload(np.concatenate(step_pivots), device)
+                if use_pivots
+                else None
+            )
+            vertex_extra = (
+                self._vertex_tokens(
+                    upload(np.concatenate(vertex_ids), device),
+                    upload(np.concatenate(vertex_crossed), device),
+                    upload(np.concatenate(vertex_states), device)
+                    if self.vertex_features
+                    else None,
+                    features,
                 )
-                chosen = edges[select]
-                matrix = sp.csr_matrix(
-                    (weights[select], (chosen[:, 0], chosen[:, 1])),
-                    shape=(total, total),
-                )
-                pooled_views = []
-                for view in range(views):
-                    seed = walk_seed(
-                        self.seed,
-                        int(host["trawl_identity"][graph_id]),
-                        step,
-                        group_id,
-                        view,
-                    )
-                    paths = self.walk_sampler(matrix, seed=seed, **self.walks)
-                    if not len(paths):
-                        continue
-                    paths = upload(paths, x.device)
-                    encoded = self._encode(x, paths, ranks, group_id)
-                    pooled = self._pool(encoded)
-                    pooled_views.append(pooled.mean(dim=0))
-                    walk_embeddings.append(pooled)
-                    walk_views.append(index(len(paths), view))
-                    walk_batches.append(index(len(paths), graph_id))
-                    contextual.index_add_(
-                        0,
-                        paths.flatten(),
-                        encoded.flatten(0, 1).to(contextual),
-                    )
-                    if self.occurrence_attention is not None:
-                        occurrence_values.append(encoded.flatten(0, 1))
-                        occurrence_ids.append(paths.flatten())
-                    visits.index_add_(
-                        0,
-                        paths.flatten(),
-                        visits.new_ones(paths.numel(), 1),
-                    )
-                availability.append(bool(pooled_views))
-                per_group.append(
-                    torch.stack(pooled_views).mean(dim=0)
-                    if pooled_views
-                    else fallback * 0
-                )
-            if self.walk_scope == "union":
-                graph_embeddings.append(
-                    per_group[0] if availability[0] else fallback
+                if self.vertex_ids
+                else None
+            )
+            vertex_extras.append(vertex_extra)
+            encode_args = (
+                paths,
+                codes,
+                running,
+                step_pivots if self.pivot_embedding or self.cell_memory else None,
+                vertex_extra,
+                upload(np.concatenate(vertex_pointers), device)
+                if self.back_pointers
+                else None,
+            )
+            chunk = self.eval_chunk_walks
+            if self.training or chunk is None or len(paths) <= chunk:
+                encoded = self._encode(
+                    x,
+                    encode_args[0],
+                    ranks,
+                    group_id,
+                    *encode_args[1:4],
+                    extra=encode_args[4],
+                    pointers=encode_args[5],
                 )
             else:
-                graph_embeddings.append(
-                    self.fusion(
-                        torch.stack(per_group),
-                        upload(np.array(availability), x.device).bool(),
-                        fallback,
-                    )
+                # Walks are encoded independently: chunks bound eval memory.
+                encoded = torch.cat(
+                    [
+                        self._encode(
+                            x,
+                            parts[0],
+                            ranks,
+                            group_id,
+                            *parts[1:4],
+                            extra=parts[4],
+                            pointers=parts[5],
+                        )
+                        for parts in zip(
+                            *[
+                                (None,) * -(-len(paths) // chunk)
+                                if value is None
+                                else value.split(chunk)
+                                for value in encode_args
+                            ],
+                            strict=True,
+                        )
+                    ]
                 )
-            contextual = torch.where(
-                visits > 0, contextual / visits.clamp_min(1), features
+            prepared.append(
+                (paths, owners, view_ids, codes, running, step_pivots, encoded)
             )
-            if occurrence_values:
-                from torch_geometric.utils import softmax
+        if self.cell_memory:
+            prepared = self._memory_pass(
+                x, ranks, prepared, num_states, vertex_extras
+            )
+        walk_families = []
+        for group_id, item in enumerate(prepared):
+            if item is None:
+                per_group.append(fallback * 0)
+                availability.append(fallback.new_zeros(num_graphs).bool())
+                continue
+            paths, owners, view_ids, _, _, _, encoded = item
+            pooled = self._pool(encoded)
+            if self.walk_attention:
+                walk_families.append(torch.full_like(owners, group_id))
+            walk_embeddings.append(pooled)
+            walk_batches.append(owners)
+            walk_views.append(view_ids)
+            contextual.index_add_(
+                0, paths.flatten(), encoded.flatten(0, 1).to(contextual)
+            )
+            if self.occurrence_attention is not None:
+                occurrence_values.append(encoded.flatten(0, 1))
+                occurrence_ids.append(paths.flatten())
+            visits.index_add_(
+                0, paths.flatten(), visits.new_ones(paths.numel(), 1)
+            )
+            # Mean over each view's walks, then over the views that sampled.
+            key = owners * views + view_ids
+            per_view = scatter(
+                pooled, key, 0, num_graphs * views, reduce="mean"
+            ).view(num_graphs, views, -1)
+            sampled_views = (
+                torch.bincount(key, minlength=num_graphs * views)
+                .view(num_graphs, views)
+                .gt(0)
+            )
+            count = sampled_views.sum(dim=1, keepdim=True)
+            per_group.append(
+                (per_view * sampled_views.unsqueeze(-1)).sum(dim=1)
+                / count.clamp_min(1)
+            )
+            availability.append(count.squeeze(1) > 0)
+        if self.walk_scope == "union":
+            graph_embedding = torch.where(
+                availability[0].unsqueeze(-1), per_group[0], fallback
+            )
+        else:
+            stacked = torch.stack(per_group, dim=1)
+            available = torch.stack(availability, dim=1)
+            if self.fusion.mode in NeighborhoodFusion.GATED:
+                # Learned family gates: also report the softmax weights.
+                gated = available
+                if self.training and self.family_dropout > 0:
+                    keep = (
+                        torch.rand(available.shape, device=available.device)
+                        >= self.family_dropout
+                    )
+                    dropped = available & keep
+                    # A graph that would lose every family keeps them all.
+                    gated = torch.where(
+                        dropped.any(dim=1, keepdim=True), dropped, available
+                    )
+                fused = [
+                    self.fusion(stacked[g], gated[g], fallback[g], True)
+                    for g in range(num_graphs)
+                ]
+                graph_embedding = torch.stack([f for f, _ in fused])
+                live_weights = torch.stack([w for _, w in fused])
+                family_weights = live_weights.detach()
+                if self.training and self.gate_entropy > 0:
+                    entropy = -(
+                        live_weights * torch.log(live_weights.clamp_min(1e-12))
+                    ).sum(dim=1)
+                    gate_aux_loss = -self.gate_entropy * entropy.mean()
+            else:
+                graph_embedding = torch.stack(
+                    [
+                        self.fusion(stacked[g], available[g], fallback[g])
+                        for g in range(num_graphs)
+                    ]
+                )
+        if self.walk_attention and walk_embeddings:
+            graph_embedding = self._attend_walks(
+                torch.cat(walk_embeddings),
+                torch.cat(walk_batches),
+                torch.cat(walk_families),
+                num_graphs,
+                graph_embedding,
+            )
+        contextual = torch.where(
+            visits > 0, contextual / visits.clamp_min(1), features
+        )
+        if occurrence_values:
+            from torch_geometric.utils import softmax
 
-                values, ids = (
-                    torch.cat(occurrence_values),
-                    torch.cat(occurrence_ids),
+            values, ids = (
+                torch.cat(occurrence_values),
+                torch.cat(occurrence_ids),
+            )
+            weights = softmax(
+                self.occurrence_attention(values), ids, num_nodes=num_states
+            )
+            attended = torch.zeros_like(contextual).index_add(
+                0, ids, (values * weights).to(contextual)
+            )
+            contextual = torch.where(visits > 0, attended, features)
+        if self.graph_readout == "cells":
+            graph_embedding = pool_by_graph(contextual)
+        if self.pe_skip:
+            graph_embedding = graph_embedding + self.pe_skip_net(
+                self._pe_summary(
+                    batch.trawl_pe[:num_states], ranks, state_graph, counts
                 )
-                weights = softmax(
-                    self.occurrence_attention(values), ids, num_nodes=total
-                )
-                attended = torch.zeros_like(contextual).index_add(
-                    0, ids, (values * weights).to(contextual)
-                )
-                contextual = torch.where(visits > 0, attended, features)
-            if self.graph_readout == "cells":
-                graph_embeddings[-1] = self._pool(contextual[None])[0]
-            rank_offset = 0
-            for rank, size in enumerate(sizes):
-                rank_cells[rank].append(
-                    contextual[rank_offset : rank_offset + size]
-                )
-                rank_batches[rank].append(index(size, graph_id))
-                rank_offset += size
-            all_cells.append(contextual)
-            all_ranks.append(ranks)
-            nodes.append(contextual[: sizes[0]])
-            node_batches.append(index(sizes[0], graph_id))
-            state_offset += total
-        result = {
-            "x_0": torch.cat(nodes),
-            "batch_0": torch.cat(node_batches),
-            "cell_embeddings": torch.cat(all_cells),
-            "cell_ranks": torch.cat(all_ranks),
-            "graph_embedding": torch.stack(graph_embeddings),
+            ).to(graph_embedding.dtype)
+        result = {}
+        if (
+            self.walk_scope == "separate"
+            and self.fusion.mode in NeighborhoodFusion.GATED
+        ):
+            result["family_weights"] = family_weights.float()
+            if self.training and self.gate_entropy > 0:
+                result["aux_loss"] = gate_aux_loss.float()
+        result |= {
+            "cell_embeddings": contextual,
+            "cell_ranks": ranks,
+            "graph_embedding": graph_embedding,
             "labels": batch.get("y"),
             "walk_readout_compatible": self.walk_scope == "union"
             and self.graph_readout == "walks",
             "num_views": views,
         }
+        for rank in range(self.max_rank + 1):
+            mask = ranks == rank
+            result[f"x_{rank}"] = contextual[mask]
+            result[f"batch_{rank}"] = state_graph[mask]
         result["walk_embedding"] = (
             torch.cat(walk_embeddings)
             if walk_embeddings
-            else result["graph_embedding"].new_empty((0, self.output_dim))
+            else graph_embedding.new_empty((0, self.output_dim))
         )
         result["walk_batch"] = (
             torch.cat(walk_batches)
@@ -1967,9 +3326,6 @@ class TRAWL(nn.Module):
             if walk_views
             else result["batch_0"].new_empty(0)
         )
-        for rank in range(1, self.max_rank + 1):
-            result[f"x_{rank}"] = torch.cat(rank_cells[rank])
-            result[f"batch_{rank}"] = torch.cat(rank_batches[rank])
         return result
 
 
@@ -2040,6 +3396,10 @@ class TRAWLReadout(nn.Module):
     input_dropout : float, optional
         Dropout probability on head inputs; defaults to ``dropout`` if None
         (default: None).
+    walk_reduce : str, optional
+        With ``walk_logits``, how per-walk logits are combined per graph:
+        ``"mean"``, ``"max"`` or ``"logsumexp"`` (minus the log walk count,
+        so it lies between mean and max) (default: "mean").
     """
 
     def __init__(
@@ -2052,8 +3412,12 @@ class TRAWLReadout(nn.Module):
         dropout=0.0,
         aggregation="embedding",
         input_dropout=None,
+        walk_reduce="mean",
     ):
         super().__init__()
+        if walk_reduce not in {"mean", "max", "logsumexp"}:
+            raise ValueError("walk_reduce must be mean, max or logsumexp")
+        self.walk_reduce = walk_reduce
         if task_level not in {"node", "graph"}:
             raise ValueError("TRAWL supports TopoBench's node and graph tasks")
         if aggregation not in {"embedding", "walk_logits"}:
@@ -2118,6 +3482,22 @@ class TRAWLReadout(nn.Module):
                     predictions.new_ones(len(predictions), 1),
                 )
                 logits = sums / count.clamp_min(1)
+                if self.walk_reduce != "mean":
+                    owners = model_out["walk_batch"]
+                    high = scatter(
+                        predictions, owners, 0, shape[0], reduce="max"
+                    )
+                    if self.walk_reduce == "max":
+                        logits = high
+                    else:
+                        total = predictions.new_zeros(shape).index_add(
+                            0, owners, (predictions - high[owners]).exp()
+                        )
+                        logits = (
+                            high
+                            + total.clamp_min(1e-30).log()
+                            - count.clamp_min(1).log()
+                        )
                 missing = count.squeeze(-1) == 0
                 if missing.any():
                     logits[missing] = self.head(

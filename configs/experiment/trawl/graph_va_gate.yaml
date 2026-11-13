@@ -1,0 +1,13 @@
+# @package _global_
+# VA with a learned global gate over the three families (fusion: learned);
+# the gate logits are excluded from weight decay so the weights are readable.
+# Logged as {val,test}/gate_w{0,1,2} = atoms, bonds, rings.
+defaults:
+  - /experiment/trawl/graph_va@_here_
+
+model:
+  backbone:
+    fusion: learned
+optimizer:
+  no_decay: [fusion.weights]
+tags: [trawl, graph, all_ranks, gate]

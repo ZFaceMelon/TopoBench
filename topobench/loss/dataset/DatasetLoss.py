@@ -12,13 +12,32 @@ class DatasetLoss(AbstractLoss):
     Parameters
     ----------
     dataset_loss : dict
-        Dictionary containing the dataset loss information.
+        Dictionary containing the dataset loss information. An optional
+        ``class_weights`` entry (cross-entropy classification only) is either
+        a list of per-class weights or ``"balanced"``: inverse class
+        frequency of the training labels, set via ``set_class_weights_from``.
     """
 
     def __init__(self, dataset_loss):
         super().__init__()
         self.task = dataset_loss["task"]
         self.loss_type = dataset_loss["loss_type"]
+        weights = dataset_loss.get("class_weights", None)
+        self.class_weights = None
+        self.needs_class_weights = False
+        if weights is not None:
+            if self.task != "classification" or (
+                self.loss_type != "cross_entropy"
+            ):
+                raise ValueError(
+                    "class_weights needs cross_entropy classification"
+                )
+            if weights == "balanced":
+                self.needs_class_weights = True
+            else:
+                self.class_weights = torch.tensor(
+                    [float(w) for w in weights]
+                )
         # Dataset loss
         if self.task == "classification":
             if self.loss_type == "cross_entropy":
@@ -48,6 +67,23 @@ class DatasetLoss(AbstractLoss):
             self.criterion = torch.nn.L1Loss()
         else:
             raise Exception("Loss is not defined")
+
+    def set_class_weights_from(self, labels, num_classes=None):
+        r"""Set balanced weights ``n / (classes * count_c)`` from labels.
+
+        Parameters
+        ----------
+        labels : torch.Tensor
+            Training labels.
+        num_classes : int, optional
+            Number of classes; inferred from the labels if None
+            (default: None).
+        """
+        labels = labels.reshape(-1).long()
+        counts = torch.bincount(labels, minlength=num_classes or 0).double()
+        weights = labels.numel() / (len(counts) * counts.clamp_min(1))
+        self.class_weights = weights.float()
+        self.needs_class_weights = False
 
     def __repr__(self) -> str:
         return f"{self.__class__.__name__}(task={self.task}, loss_type={self.loss_type})"
@@ -97,7 +133,18 @@ class DatasetLoss(AbstractLoss):
         elif self.task == "classification":
             if self.loss_type == "BCE":
                 target = target.to(logits).reshape_as(logits)
-            dataset_loss = self.criterion(logits, target)
+            if self.needs_class_weights:
+                raise RuntimeError(
+                    "Balanced class weights were requested but never set"
+                )
+            if self.class_weights is not None:
+                dataset_loss = torch.nn.functional.cross_entropy(
+                    logits,
+                    target,
+                    weight=self.class_weights.to(logits.device, logits.dtype),
+                )
+            else:
+                dataset_loss = self.criterion(logits, target)
 
         elif self.task == "multilabel classification":
             mask = ~torch.isnan(target)

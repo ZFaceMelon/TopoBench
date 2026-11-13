@@ -1,0 +1,74 @@
+# @package _global_
+# Lifted walks on LoopBound (dataset=simplicial/loop_bound): baseline A, late
+# fusion. One walk family per rank, each a rank-k walk pivoting across shared
+# faces: vertices over edges (up_adjacency-0), edges over vertices
+# (down_adjacency-1), triangles over edges (down_adjacency-2). Families are
+# encoded separately and only meet at pooling. Cross-rank mechanisms are
+# flags on top (model.backbone.pivot_embedding / cell_memory /
+# walk_attention); the transform stores pivots for all of them so the cache
+# is shared. Recipe = trawl/mantra_arch.
+defaults:
+  - override /model: combinatorial/trawl
+  - override /optimizer: trawl
+  - override /transforms: trawl_existing
+  - override /dataset: simplicial/loop_bound
+
+transforms:
+  trawl:
+    neighborhoods: [up_adjacency-0, down_adjacency-1, down_adjacency-2]
+    signs: true
+    pivots: true
+
+dataset:
+  split_params:
+    # Five seeds of the HOPSE/TopoBench protocol: stratified 50/25/25.
+    split_type: seeded_stratified
+    data_seed: ${seed}
+    train_prop: 0.5
+  dataloader_params:
+    batch_size: 128
+    order_seed: ${seed}
+    # Sparse incidences cannot be pinned.
+    pin_memory: false
+trainer:
+  max_epochs: 100
+  check_val_every_n_epoch: 1
+  gradient_clip_val: 1.0
+callbacks:
+  early_stopping:
+    patience: 40
+optimizer:
+  parameters:
+    lr: 0.001
+    weight_decay: 0.001
+  scheduler:
+    monitor: val/f1
+    scheduler_params:
+      patience: 10
+model:
+  backbone:
+    architecture: gru
+    walk_scope: separate
+    num_neighborhoods: 3
+    revisit_embedding: true
+    orientation_embedding: true
+    walks:
+      k: 12
+    hidden_dim: 128
+    dropout: 0.1
+    eval_views: 3
+    # 43k small complexes: cache every transition table.
+    transition_cache_size: 400000
+    layer_options:
+      mamba:
+        backend: mamba_ssm
+  readout:
+    dropout: 0.0
+loss:
+  dataset_loss:
+    class_weights: balanced
+evaluation:
+  walk_views: 3
+evaluator:
+  validate_args: false
+tags: [trawl, lifted, loop_bound]

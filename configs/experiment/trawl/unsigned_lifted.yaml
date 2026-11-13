@@ -1,0 +1,71 @@
+# @package _global_
+# Unsigned lifted walks (MANTRA, e.g. dataset=simplicial/mantra_orientation).
+# Signs are off everywhere: no transforms.trawl.signs, no orientation or
+# running-orientation embeddings; encodings use unsigned matrices. The
+# transform stores unsigned cell vertex lists and pivot cells so the cross-rank
+# mechanisms (model.backbone.vertex_ids / cell_memory / pivot_embedding /
+# walk_attention) can share a cache. Default walk family: triangles over
+# shared edges (down_adjacency-2). Recipe = trawl/mantra_arch.
+defaults:
+  - override /model: combinatorial/trawl
+  - override /optimizer: trawl
+  - override /transforms: trawl_existing
+
+transforms:
+  trawl:
+    neighborhoods: [down_adjacency-2]
+    cell_vertices: true
+    pivots: true
+
+dataset:
+  split_params:
+    # Five seeds of the HOPSE/TopoBench protocol: stratified 50/25/25.
+    split_type: seeded_stratified
+    data_seed: ${seed}
+    train_prop: 0.5
+  dataloader_params:
+    batch_size: 128
+    order_seed: ${seed}
+    # Sparse incidences cannot be pinned.
+    pin_memory: false
+trainer:
+  max_epochs: 100
+  check_val_every_n_epoch: 1
+  gradient_clip_val: 1.0
+callbacks:
+  early_stopping:
+    patience: 40
+optimizer:
+  parameters:
+    lr: 0.001
+    weight_decay: 0.001
+  scheduler:
+    monitor: val/f1
+    scheduler_params:
+      patience: 10
+model:
+  backbone:
+    architecture: gru
+    walk_scope: separate
+    num_neighborhoods: 1
+    revisit_embedding: true
+    orientation_embedding: false
+    running_orientation: false
+    hidden_dim: 128
+    dropout: 0.1
+    eval_views: 3
+    # 43k small complexes: cache every transition table.
+    transition_cache_size: 400000
+    layer_options:
+      mamba:
+        backend: mamba_ssm
+  readout:
+    dropout: 0.0
+loss:
+  dataset_loss:
+    class_weights: balanced
+evaluation:
+  walk_views: 3
+evaluator:
+  validate_args: false
+tags: [trawl, lifted, unsigned]

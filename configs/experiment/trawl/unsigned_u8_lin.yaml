@@ -1,0 +1,9 @@
+# @package _global_
+# u8 (u2 + back-pointers) with a linear readout head.
+defaults:
+  - /experiment/trawl/unsigned_u8@_here_
+
+model:
+  readout:
+    head_hidden: null
+tags: [trawl, unsigned, u8_lin]

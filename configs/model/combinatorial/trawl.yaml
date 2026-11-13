@@ -43,6 +43,21 @@ backbone:
   occurrence_pooling: mean
   graph_readout: walks
   transition_cache_size: 1024
+  # Architecture-experiment flags (all off = baseline behaviour).
+  revisit_embedding: false
+  max_anonymous_ids: 32
+  orientation_embedding: false # needs transforms.trawl.signs=true
+  running_orientation: false # needs transforms.trawl.signs=true
+  pe_skip: false
+  pe_norm: false
+  pivot_embedding: false # needs transforms.trawl.pivots=true
+  cell_memory: false # needs transforms.trawl.pivots=true
+  walk_attention: false
+  vertex_ids: false # needs transforms.trawl.cell_vertices=true
+  walks_per_family: null # separate scope: walks per family, overrides walks.k
+  use_pe: true # false drops trawl_pe from the walk tokens (ablation)
+  back_pointers: false # needs vertex_ids: per-walk links to earlier touches of the same vertices/cell
+  straight_p: 0.0 # >0: straight (zig-zag) biased walks; needs cell_vertices + pivots
   walks:
     k: 32
     length: 32
@@ -62,3 +77,4 @@ readout:
   head_hidden: ${model.backbone.hidden_dim}
   dropout: 0.5
   aggregation: embedding
+  walk_reduce: mean

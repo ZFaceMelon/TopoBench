@@ -1,0 +1,15 @@
+# @package _global_
+# H1: Hasse walks only (up_incidence-0+up_incidence-1: rank-switching walks
+# over vertices, edges and cells), one family, no gate. V1 settings (id cap
+# 64, vertex_features).
+defaults:
+  - /experiment/trawl/graph_u8_lin_vf@_here_
+
+transforms:
+  trawl:
+    neighborhoods: [up_incidence-0+up_incidence-1]
+model:
+  backbone:
+    num_neighborhoods: 1
+    fallback_family: null
+tags: [trawl, graph, hasse_only]

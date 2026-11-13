@@ -21,13 +21,15 @@ def test_layer_compilation_preserves_state_keys(monkeypatch):
     before = set(wrapped.state_dict())
     calls = []
 
-    def compile_layer(layer):
-        calls.append(layer)
-        layer._compiled_call_impl = lambda *args: None
+    def fake_compile(fn, **kwargs):
+        calls.append(fn)
+        return fn
 
-    monkeypatch.setattr(torch.nn.Module, "compile", compile_layer)
+    monkeypatch.setattr(torch, "compile", fake_compile)
     wrapped.configure_compilation()
     wrapped.configure_compilation()
-    assert len(calls) == 2
+    # TRAWL compiles each layer call twice (checkpointed and plain), once.
+    layers = sum(len(stack) for stack in backbone.encoders)
+    assert len(calls) == 2 * layers
     assert set(wrapped.state_dict()) == before
     assert all(not key.startswith("backbone._orig_mod") for key in before)

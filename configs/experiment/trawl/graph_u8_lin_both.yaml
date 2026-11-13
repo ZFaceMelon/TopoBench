@@ -1,0 +1,11 @@
+# @package _global_
+# graph_u8_lin, but both walk families are walked in every graph: 2-cells
+# across shared edges and edges across shared vertices, fused by mean
+# (graphs without edge-adjacent 2-cells use the edge family alone).
+defaults:
+  - /experiment/trawl/graph_u8_lin@_here_
+
+model:
+  backbone:
+    fallback_family: null
+tags: [trawl, graph, u8_lin, both_families]

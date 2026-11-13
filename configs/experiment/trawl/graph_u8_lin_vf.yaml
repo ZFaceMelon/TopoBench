@@ -1,0 +1,10 @@
+# @package _global_
+# graph_u8_lin plus vertex features: every vertex of a step's cell binds its
+# anonymous id to a projection of its own input features (atom type).
+defaults:
+  - /experiment/trawl/graph_u8_lin@_here_
+
+model:
+  backbone:
+    vertex_features: true
+tags: [trawl, graph, u8_lin, vertex_features]

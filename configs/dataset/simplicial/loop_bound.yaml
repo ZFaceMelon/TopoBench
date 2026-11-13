@@ -1,0 +1,34 @@
+# LoopBound diagnostic: does the marked edge cycle (edge feature x_1) bound
+# over Z/2? Built by scripts/loop_bound/make_loop_bound.py from MANTRA tori,
+# Klein bottles and projective planes; balanced and length-matched per complex.
+loader:
+  _target_: topobench.data.loaders.LoopBoundDatasetLoader
+  parameters:
+    data_domain: simplicial
+    data_type: synthetic
+    data_name: LoopBound
+    data_dir: ${paths.data_dir}/${dataset.loader.parameters.data_domain}/${dataset.loader.parameters.data_type}
+    model_domain: ${model.model_domain}
+
+parameters:
+  num_features: [1,1,1]
+  num_classes: 2
+  task: classification
+  loss_type: cross_entropy
+  monitor_metric: f1
+  task_level: graph
+  data_seed: 0
+  metrics: [accuracy, precision, recall, auroc, f1]
+
+split_params:
+  learning_setting: inductive
+  data_split_dir: ${paths.data_dir}/data_splits/${dataset.loader.parameters.data_name}
+  data_seed: 0
+  split_type: stratified
+  k: 10
+  train_prop: 0.5
+
+dataloader_params:
+  batch_size: 256
+  num_workers: 0
+  pin_memory: False

@@ -1,0 +1,15 @@
+# @package _global_
+# u9lin: pure-walk unsigned TRAWL. u9 (u2 + back-pointers, no precomputed
+# encodings in the walk tokens) with a linear readout head. Eval views set
+# explicitly to 4 (user standard).
+defaults:
+  - /experiment/trawl/unsigned_u9@_here_
+
+model:
+  readout:
+    head_hidden: null
+  backbone:
+    eval_views: 4
+evaluation:
+  walk_views: 4
+tags: [trawl, unsigned, u9_lin]

@@ -1,0 +1,11 @@
+# @package _global_
+# u8 = u2 + back-pointers (per-walk links to the last earlier steps touching
+# the same vertices / cell). Activation checkpointing only saves memory.
+defaults:
+  - /experiment/trawl/unsigned_u2@_here_
+
+model:
+  backbone:
+    back_pointers: true
+    checkpoint_layers: true
+tags: [trawl, unsigned, u8]

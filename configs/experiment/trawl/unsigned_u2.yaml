@@ -1,0 +1,18 @@
+# @package _global_
+# u2: unsigned triangle walks + per-walk anonymous vertex ids (headline
+# unsigned ORIENT arm). trawl/unsigned_lifted (no signs anywhere; triangles
+# over shared edges, k=32, length 32; revisit ids) plus vertex_ids, with the
+# epoch cap raised to 200 (early stopping patience 40 on val unchanged) and
+# eval views fixed at 3 for validation and test.
+defaults:
+  - /experiment/trawl/unsigned_lifted@_here_
+
+trainer:
+  max_epochs: 200
+model:
+  backbone:
+    vertex_ids: true
+    eval_views: 3
+evaluation:
+  walk_views: 3
+tags: [trawl, unsigned, u2]

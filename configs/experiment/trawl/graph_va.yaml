@@ -1,0 +1,18 @@
+# @package _global_
+# VA (all ranks): lifted same-rank walks at every included rank, as three
+# separately encoded walk families in every graph: atoms over bonds
+# (up_adjacency-0), bonds over shared atoms (down_adjacency-1) and rings over
+# shared bonds (down_adjacency-2). Graphs without edge-adjacent rings simply
+# have no ring family (fusion ignores unavailable families). V2 settings:
+# id cap 64, vertex_features; plain mean fusion.
+defaults:
+  - /experiment/trawl/graph_u8_lin_vf@_here_
+
+transforms:
+  trawl:
+    neighborhoods: [up_adjacency-0, down_adjacency-1, down_adjacency-2]
+model:
+  backbone:
+    num_neighborhoods: 3
+    fallback_family: null
+tags: [trawl, graph, all_ranks]

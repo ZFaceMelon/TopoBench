@@ -1,0 +1,59 @@
+# @package _global_
+# TRAWL u8_lin (unsigned lifted walks + anonymous vertex ids + back-pointers,
+# linear readout head) on graph datasets (dataset=graph/NCI1, graph/PROTEINS)
+# lifted exactly as HOPSE-M-C: graph2cell cycle lifting, cells up to 10
+# vertices. Walks: 2-cells across shared edges (down_adjacency-2); a graph
+# without edge-adjacent 2-cells walks edges across shared vertices
+# (down_adjacency-1) instead (backbone.fallback_family). Split protocol of the
+# HOPSE sweep: split_type random, train_prop 0.5, data_seed = seed in
+# {0,3,5,7,9}. Early stopping and checkpoint selection on val/loss.
+defaults:
+  - /experiment/trawl/unsigned_u8_lin@_here_
+  - override /transforms: trawl_cycle
+  - override /dataset: graph/NCI1
+
+transforms:
+  trawl:
+    neighborhoods: [down_adjacency-2, down_adjacency-1]
+    cell_vertices: true
+    pivots: true
+    cell_vertex_width: ${transforms.lifting.max_cell_length}
+
+dataset:
+  split_params:
+    split_type: random
+    data_seed: ${seed}
+    train_prop: 0.5
+
+# Early stopping, checkpoint selection and the LR plateau follow val/loss
+# (user decision 2026-11-06: noisy val metric spikes cut off slow seeds).
+callbacks:
+  early_stopping:
+    monitor: val/loss
+    mode: min
+  model_checkpoint:
+    monitor: val/loss
+    mode: min
+optimizer:
+  scheduler:
+    monitor: val/loss
+    scheduler_params:
+      mode: min
+
+model:
+  backbone:
+    num_neighborhoods: 2
+    fallback_family: 1
+    max_cell_vertices: ${transforms.trawl.cell_vertex_width}
+    eval_views: 4
+    # Anonymous ids are clipped at max_anonymous_ids - 1. With cap 32, 3.7%
+    # of PROTEINS walks (0.3% NCI1) touch >= 32 distinct vertices; cap 64
+    # leaves ~0% (max seen 67 on PROTEINS, 44 on NCI1).
+    max_anonymous_ids: 64
+    # Encode eval walks in chunks (memory only; outputs unchanged).
+    eval_chunk_walks: 4096
+    # A few thousand small complexes: cache every transition table.
+    transition_cache_size: 100000
+evaluation:
+  walk_views: 4
+tags: [trawl, graph, u8_lin]

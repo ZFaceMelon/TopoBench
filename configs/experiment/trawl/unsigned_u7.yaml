@@ -1,0 +1,12 @@
+# @package _global_
+# u7 = u2 with the precomputed encodings (trawl_pe) left out of the walk
+# tokens: pure-walk ablation. Tokens keep the constant per-rank input
+# projection, rank embedding, move embedding, revisit ids, vertex ids and
+# crossed-face ids.
+defaults:
+  - /experiment/trawl/unsigned_u2@_here_
+
+model:
+  backbone:
+    use_pe: false
+tags: [trawl, unsigned, u7]

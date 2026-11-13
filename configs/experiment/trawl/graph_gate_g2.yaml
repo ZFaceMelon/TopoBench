@@ -1,0 +1,11 @@
+# @package _global_
+# G2: G1 with a per-graph gate: a small MLP on the concatenated, availability-
+# masked family embeddings gives each graph its own softmax over families
+# (fusion: gate_mlp). Logged weights are dataset means.
+defaults:
+  - /experiment/trawl/graph_gate_g1@_here_
+
+model:
+  backbone:
+    fusion: gate_mlp
+tags: [trawl, graph, gate, per_graph]

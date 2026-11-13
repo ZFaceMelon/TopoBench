@@ -1,11 +1,14 @@
 """This module defines the `TBModel` class."""
 
+import logging
 from typing import Any
 
 import torch
 from lightning import LightningModule
 from torch_geometric.data import Data
 from torchmetrics import MeanMetric
+
+log = logging.getLogger(__name__)
 
 
 class HostBatchTransferMixin:
@@ -193,6 +196,10 @@ class TBModel(HostBatchTransferMixin, LightningModule):
 
         # Metric
         model_out = self.loss(model_out=model_out, batch=batch)
+        # Auxiliary training losses from the backbone (e.g. a gate entropy
+        # bonus); absent unless such an option is enabled.
+        if model_out.get("aux_loss") is not None:
+            model_out["loss"] = model_out["loss"] + model_out["aux_loss"]
 
         # Add batch to model_out for evaluator access to target normalizer stats
         model_out["batch"] = batch
@@ -259,6 +266,7 @@ class TBModel(HostBatchTransferMixin, LightningModule):
             prog_bar=True,
             batch_size=1,
         )
+        self._log_family_weights("val", model_out)
 
     def test_step(self, batch: Data, batch_idx: int) -> None:
         r"""Perform a single test step on a batch of data.
@@ -284,6 +292,45 @@ class TBModel(HostBatchTransferMixin, LightningModule):
             prog_bar=True,
             batch_size=1,
         )
+        self._log_family_weights("test", model_out)
+
+    def _log_family_weights(self, split: str, model_out: dict) -> None:
+        r"""Log the mean softmax weight of each walk family, if any.
+
+        Parameters
+        ----------
+        split : str
+            ``"val"`` or ``"test"``.
+        model_out : dict
+            Model outputs; ``family_weights`` (``[graphs, families]``) is
+            present only for backbones with learned family gates.
+        """
+        weights = model_out.get("family_weights")
+        if weights is None:
+            return
+        spread = (
+            weights.std(dim=0) if len(weights) > 1 else torch.zeros_like(weights[0])
+        )
+        for family, (value, std) in enumerate(
+            zip(weights.mean(dim=0), spread, strict=True)
+        ):
+            self.log(
+                f"{split}/gate_w{family}",
+                value,
+                sync_dist=True,
+                on_step=False,
+                on_epoch=True,
+                batch_size=len(weights),
+            )
+            # Per-graph spread of the weight (batch std, averaged).
+            self.log(
+                f"{split}/gate_sd{family}",
+                std,
+                sync_dist=True,
+                on_step=False,
+                on_epoch=True,
+                batch_size=len(weights),
+            )
 
     def process_outputs(self, model_out: dict, batch: Data) -> dict:
         r"""Handle model outputs.
@@ -431,6 +478,10 @@ class TBModel(HostBatchTransferMixin, LightningModule):
         if not self.hparams.get("compile", False):
             return
         scope = self.hparams.get("compile_scope", "backbone")
+        if scope == "layers" and hasattr(self.backbone, "compile_layers"):
+            # TRAWL: compile the (checkpointed) layer calls, not the modules.
+            self.backbone.compile_layers()
+            return
         if scope == "layers":
             if not hasattr(self.backbone, "encoders"):
                 raise ValueError("Layer compilation requires encoder stacks")
@@ -460,11 +511,43 @@ class TBModel(HostBatchTransferMixin, LightningModule):
         dict:
             A dict containing the configured optimizers and learning-rate schedulers to be used for training.
         """
-        optimizer_config = self.optimizer.configure_optimizer(
-            list(self.backbone.parameters())
-            + list(self.readout.parameters())
-            + list(self.feature_encoder.parameters())
-        )
+        patterns = getattr(self.optimizer, "no_decay", None)
+        if patterns:
+            import re
+
+            named = [
+                (f"{prefix}.{name}", parameter)
+                for prefix, module in (
+                    ("backbone", self.backbone),
+                    ("readout", self.readout),
+                    ("feature_encoder", self.feature_encoder),
+                )
+                for name, parameter in module.named_parameters()
+            ]
+            skip = [
+                any(re.search(pattern, name) for pattern in patterns)
+                for name, _ in named
+            ]
+            if not any(skip):
+                raise ValueError(f"no_decay patterns match nothing: {patterns}")
+            log.info(
+                "Excluded from weight decay: %s",
+                [name for (name, _), s in zip(named, skip, strict=True) if s],
+            )
+            parameters = [
+                {"params": [p for (_, p), s in zip(named, skip, strict=True) if not s]},
+                {
+                    "params": [p for (_, p), s in zip(named, skip, strict=True) if s],
+                    "weight_decay": 0.0,
+                },
+            ]
+        else:
+            parameters = (
+                list(self.backbone.parameters())
+                + list(self.readout.parameters())
+                + list(self.feature_encoder.parameters())
+            )
+        optimizer_config = self.optimizer.configure_optimizer(parameters)
         scheduler = optimizer_config.get("lr_scheduler")
         if scheduler is not None and isinstance(
             scheduler["scheduler"], torch.optim.lr_scheduler.ReduceLROnPlateau
